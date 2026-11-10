@@ -163,7 +163,7 @@ class Window(W.QMainWindow):
             card,cl=self.card();cl.setSpacing(3);cl.addWidget(self.label(title,'section'));metric=self.label('—','metric');cl.addWidget(metric);cl.addWidget(self.label(unit,'muted'));self.metric_labels.append(metric);cards.addWidget(card)
         main.addLayout(cards)
         graph,l=self.card();graph.setMinimumHeight(220);l.setContentsMargins(12,10,12,10)
-        topline=W.QHBoxLayout();topline.addWidget(self.label('光谱 / SPECTRUM','section'));topline.addStretch();self.cursor_label=self.label('移动游标查看波长与强度','muted');topline.addWidget(self.cursor_label);l.addLayout(topline)
+        topline=W.QHBoxLayout();topline.addWidget(self.label('光谱 / SPECTRUM','section'));topline.addStretch();self.cursor_label=self.label('移动鼠标查看波长与强度','muted');topline.addWidget(self.cursor_label);l.addLayout(topline)
         pg.setConfigOptions(antialias=True,background='#ffffff',foreground='#526477')
         self.spectrum_view=SpectrumViewBox();self.plot=pg.PlotWidget(viewBox=self.spectrum_view);self.plot.setLabel('bottom','Wavelength',units='nm');self.plot.setLabel('left','Intensity',units='counts');self.plot.showGrid(x=True,y=True,alpha=.13);self.plot.setMouseEnabled(x=False,y=False);self.plot.setMenuEnabled(False)
         self.plot.getAxis('left').enableAutoSIPrefix(False);
@@ -171,7 +171,12 @@ class Window(W.QMainWindow):
             axis=self.plot.getAxis(name);axis.setTickFont(self.font());axis.label.setFont(self.font())
         self.plot.setXRange(350,950,padding=0);self.plot.setYRange(0,16000,padding=0)
         self.raw_curve=self.plot.plot(pen=pg.mkPen('#abb7c4',width=1));self.curve=self.plot.plot(pen=pg.mkPen('#245b8f',width=1.8));self.markers=pg.ScatterPlotItem(size=7,brush='#a96820',pen=None);self.plot.addItem(self.markers)
-        self.halfline=self.plot.plot(pen=pg.mkPen('#a96820',width=1,style=QtCore.Qt.PenStyle.DashLine));self.cross=pg.InfiniteLine(angle=90,movable=False,pen=pg.mkPen('#7d8997',style=QtCore.Qt.PenStyle.DotLine));self.plot.addItem(self.cross);self.plot.scene().sigMouseMoved.connect(self.mouse_moved)
+        self.halfline=self.plot.plot(pen=pg.mkPen('#a96820',width=1,style=QtCore.Qt.PenStyle.DashLine))
+        self.cursor_wave=None
+        self.cursor_marker=pg.ScatterPlotItem(size=11,symbol='o',pxMode=True,brush='#ffe066',pen=pg.mkPen('#805615',width=1.5))
+        self.cursor_marker.setZValue(50);self.cursor_marker.hide();self.plot.addItem(self.cursor_marker,ignoreBounds=True)
+        self.plot.viewport().setCursor(QtCore.Qt.CursorShape.ArrowCursor);self.spectrum_view.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
+        self.plot.viewport().installEventFilter(self);self.plot.scene().sigMouseMoved.connect(self.mouse_moved)
         self.baseline=pg.InfiniteLine(pos=0,angle=0,movable=False,pen=pg.mkPen('#8a98a5',style=QtCore.Qt.PenStyle.DashLine));self.plot.addItem(self.baseline)
         l.addWidget(self.plot,1)
         self.navigation_label=self.label('','muted');self.navigation_label.setWordWrap(True);l.addWidget(self.navigation_label)
@@ -278,6 +283,7 @@ class Window(W.QMainWindow):
         else:self.curve.setPen(pg.mkPen('#84b9ed' if self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark) else '#245b8f',width=1.8));self.curve.setFillLevel(None)
         self.curve.setData(x,shown)
         self.fit_display()
+        self.update_cursor_marker()
         self.peaks=analyze(x,y,self.range_start.value(),self.range_end.value())
         clipped=bool(np.any((32767-f['adc_frames'].astype(np.int32))[:,10:2041]>=16500))
         if clipped:
@@ -331,9 +337,27 @@ class Window(W.QMainWindow):
             for box,value in ((self.display_start,float(x.min())),(self.display_end,float(x.max()))):
                 box.blockSignals(True);box.setValue(value);box.blockSignals(False)
             self.fit_display()
+    def clear_cursor_marker(self):
+        self.cursor_wave=None;self.cursor_marker.hide()
+        self.cursor_label.setText('移动鼠标查看波长与强度')
+    def update_cursor_marker(self):
+        if self.cursor_wave is None or self.frame_data is None:return
+        wave=self.frame_data['wave'];low,high=self.spectrum_view.viewRange()[0]
+        if not max(low,float(wave[0]))<=self.cursor_wave<=min(high,float(wave[-1])):
+            self.clear_cursor_marker();return
+        intensity=float(np.interp(self.cursor_wave,wave,self.displayed))
+        if not np.isfinite(intensity):
+            self.clear_cursor_marker();return
+        self.cursor_marker.setData([self.cursor_wave],[intensity]);self.cursor_marker.show()
+        self.cursor_label.setText(f'{self.cursor_wave:.2f} nm  ·  {intensity:.1f} counts')
     def mouse_moved(self,pos):
-        if self.frame_data is None or not self.plot.sceneBoundingRect().contains(pos):return
-        point=self.plot.plotItem.vb.mapSceneToView(pos);i=int(np.argmin(abs(self.frame_data['wave']-point.x())));self.cross.setPos(self.frame_data['wave'][i]);self.cursor_label.setText(f"{self.frame_data['wave'][i]:.2f} nm  ·  {self.corrected[i]:.1f} counts")
+        if self.frame_data is None or not self.spectrum_view.sceneBoundingRect().contains(pos):
+            self.clear_cursor_marker();return
+        self.cursor_wave=self.spectrum_view.mapSceneToView(pos).x();self.update_cursor_marker()
+    def eventFilter(self,watched,event):
+        if event.type()==QtCore.QEvent.Type.Leave and hasattr(self,'plot') and watched is self.plot.viewport():
+            self.clear_cursor_marker()
+        return super().eventFilter(watched,event)
     def request_auto(self):
         if not self.ready or getattr(self,'auto_busy',False):return
         self.auto_busy=True;self.busy=True;self.set_controls(True);self.auto_request.emit()
@@ -364,6 +388,7 @@ class Window(W.QMainWindow):
     def change_theme(self,*_):
         if not hasattr(self,'plot'):return
         dark=apply_theme(W.QApplication.instance(),self.theme.currentText());self.plot.setBackground('#18212c' if dark else '#ffffff')
+        self.cursor_marker.setPen(pg.mkPen('#ffffff' if dark else '#805615',width=1.5))
         for name in ('left','bottom'):
             axis=self.plot.getAxis(name);axis.setPen('#aebfd0' if dark else '#526477');axis.setTextPen('#aebfd0' if dark else '#526477')
         self.render()
