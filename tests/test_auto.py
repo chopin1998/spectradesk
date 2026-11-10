@@ -1,0 +1,92 @@
+import time
+import numpy as np
+import pytest
+from PySide6.QtCore import QCoreApplication,QEventLoop,QTimer
+from spectradesk.driver import Driver
+from spectradesk.worker import Acquisition
+
+@pytest.fixture(scope='module')
+def app():
+    return QCoreApplication.instance() or QCoreApplication([])
+
+class FakeDriver:
+    auto_steps=Driver.auto_steps
+    def __init__(self,signal=100,parameter=250):
+        self.parameter=parameter;self.signal=signal;self.captures=0;self.closed=False
+    def set_parameter(self,p):self.parameter=p
+    def capture(self,average):
+        self.captures+=1
+        counts=np.full((average,2048),1900.)
+        counts[:,500]=min(16640,1900+self.signal*self.parameter)
+        return (32767-counts).astype(np.uint16)
+    def close(self):self.closed=True
+
+
+def run_auto(app,driver,hook=None):
+    worker=Acquisition();worker.ready=True;worker.driver=driver
+    worker.timer=QTimer(worker);worker.running=True
+    messages=[];states=[];errors=[]
+    worker.auto_done.connect(lambda p,m:messages.append((p,m)))
+    worker.error.connect(errors.append)
+    loop=QEventLoop();worker.auto_done.connect(loop.quit)
+    def state(text):
+        states.append(text)
+        if hook:hook(worker,text)
+    worker.state.connect(state)
+    timeout=QTimer();timeout.setSingleShot(True);timeout.timeout.connect(loop.quit);timeout.start(2000)
+    worker.auto();loop.exec();timeout.stop()
+    worker.timer.stop()
+    if worker.auto_timer:worker.auto_timer.stop()
+    assert messages,states
+    assert not errors
+    assert worker.ready and not driver.closed
+    assert worker.auto_iterator is None
+    return worker,messages,states
+
+
+def test_converges_with_yields_between_frames(app):
+    driver=FakeDriver()
+    worker,messages,states=run_auto(app,driver)
+    assert abs(messages[0][0]-101)<=1
+    assert '自动完成' in messages[0][1]
+    assert any('1/3 帧' in s for s in states)
+    assert worker.running
+
+@pytest.mark.parametrize('signal,expected,reason',[(0,1000,'光线过弱'),(2000,15,'光线过强')])
+def test_unreachable_target_keeps_device_connected(app,signal,expected,reason):
+    worker,messages,_=run_auto(app,FakeDriver(signal))
+    assert messages[0][0]==expected
+    assert reason in messages[0][1]
+    assert worker.running
+
+
+def test_cancel_is_processed_between_usb_frames(app):
+    driver=FakeDriver()
+    def cancel(worker,text):
+        if '1/3 帧' in text:QTimer.singleShot(0,worker.stop)
+    worker,messages,_=run_auto(app,driver,cancel)
+    assert '已取消' in messages[0][1]
+    assert driver.captures==1
+    assert not worker.running
+
+
+def test_timeout_keeps_last_hardware_parameter(app):
+    driver=FakeDriver()
+    def expire(worker,text):
+        if '1/3 帧' in text:worker.auto_started=time.monotonic()-31
+    worker,messages,_=run_auto(app,driver,expire)
+    assert '30 秒时限' in messages[0][1]
+    assert messages[0][0]==driver.parameter
+    assert driver.captures==1
+
+
+def test_transport_failure_closes_device(app):
+    worker=Acquisition();worker.ready=True;worker.driver=FakeDriver()
+    driver=worker.driver
+    def fail(average):raise RuntimeError('USB timeout')
+    driver.capture=fail
+    errors=[];worker.error.connect(errors.append)
+    worker.auto();worker.auto_timer.stop();worker.auto_step()
+    assert errors==['USB timeout']
+    assert not worker.ready and driver.closed
+    assert worker.auto_iterator is None

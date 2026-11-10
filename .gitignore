@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+native/*.so
+*.npz
+*.csv
+
+# Local measurements and scratch output
+tmp/
+# Reference captures are required by regression tests
+!tests/fixtures/*.npz
+!tests/fixtures/*.csv

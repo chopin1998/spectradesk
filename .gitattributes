@@ -1,0 +1,3 @@
+# Preserve original capture exports, including Windows line endings.
+tests/fixtures/*.csv -text whitespace=cr-at-eol
+tests/fixtures/*.npz -text
