@@ -18,7 +18,8 @@ QLabel#muted {color:#586777;font-size:10pt;}
 QLabel#title {font-size:21pt;font-weight:600;letter-spacing:1px;color:#213a59;}
 QLabel#section {color:#526477;font-size:11pt;font-weight:600;}
 QLabel#metric {font-size:26pt;font-weight:500;color:#213a59;}
-QLabel#badge {background:#e2ece8;color:#315c4d;border:1px solid #c4d6cd;border-radius:6px;padding:5px 10px;}
+QLabel#deviceStatus {background:#e2ece8;color:#315c4d;border:1px solid #c4d6cd;border-radius:6px;padding:5px 10px;}
+QLabel#deviceStatus[connected="false"] {background:#edf0f2;color:#586777;border-color:#d5dce2;}
 QPushButton {background:#f8f9fb;border:1px solid #bcc8d3;border-radius:5px;padding:7px 10px;}
 QPushButton:checked {background:#dce7f2;border-color:#6284a7;font-weight:600;}
 QPushButton:hover {background:#e7edf5;border-color:#6284a7;}
@@ -107,13 +108,13 @@ class Window(W.QMainWindow):
     connect_request=QtCore.Signal();disconnect_request=QtCore.Signal()
     integration_request=QtCore.Signal(int);start_request=QtCore.Signal(int,int,bool);stop_request=QtCore.Signal();auto_request=QtCore.Signal()
     def __init__(self,args):
-        super().__init__();self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None
+        super().__init__();self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
         self.setWindowTitle('SpectraDesk · 光谱测量工作台');area=W.QApplication.primaryScreen().availableGeometry();self.resize(min(1560,int(area.width()*.94)),min(1000,int(area.height()*.94)));self.setMinimumSize(1180,760)
         self.build();self.restore_settings()
         self.thread=QtCore.QThread(self);self.worker=Acquisition(args.demo);self.worker.moveToThread(self.thread)
         self.connect_request.connect(self.worker.connect_device);self.disconnect_request.connect(self.worker.disconnect_device)
         self.integration_request.connect(self.worker.set_integration);self.start_request.connect(self.worker.start);self.stop_request.connect(self.worker.stop);self.auto_request.connect(self.worker.auto)
-        self.worker.connected.connect(self.on_connected);self.worker.frame.connect(self.on_frame);self.worker.state.connect(self.on_state);self.worker.error.connect(self.on_error);self.worker.auto_done.connect(self.on_auto);self.worker.integration_changed.connect(self.update_integration)
+        self.worker.device_available.connect(self.on_device_available);self.worker.connection_changed.connect(self.on_connection_changed);self.worker.connected.connect(self.on_connected);self.worker.frame.connect(self.on_frame);self.worker.state.connect(self.on_state);self.worker.error.connect(self.on_error);self.worker.auto_done.connect(self.on_auto);self.worker.integration_changed.connect(self.update_integration)
         self.thread.finished.connect(self.worker.deleteLater);self.thread.start()
         self.set_controls(False)
         QtCore.QTimer.singleShot(150,self.connect_request.emit)
@@ -128,13 +129,13 @@ class Window(W.QMainWindow):
         root=W.QWidget();root.setObjectName('root');self.setCentralWidget(root);outer=W.QVBoxLayout(root);outer.setContentsMargins(24,18,24,12);outer.setSpacing(16)
         header=W.QHBoxLayout();brand=W.QVBoxLayout();brand.setSpacing(0);brand.addWidget(self.label('SPECTRADESK','title'));header.addLayout(brand);header.addStretch()
         self.theme=ThemeSelector();self.theme.currentTextChanged.connect(self.change_theme);header.addWidget(self.theme)
-        self.badge=self.label('模拟模式' if self.args.demo else '未连接','badge');header.addWidget(self.badge)
         self.info_button=W.QPushButton('设备与校准');self.info_button.clicked.connect(self.show_info);self.info_button.setEnabled(False);header.addWidget(self.info_button)
         self.save_button=W.QPushButton('保存测量…');self.save_button.clicked.connect(self.save);self.save_button.setEnabled(False);header.addWidget(self.save_button);outer.addLayout(header)
         body=W.QHBoxLayout();body.setSpacing(16);outer.addLayout(body,1)
         sidebar=W.QWidget();sidebar.setObjectName('root');sidebar.setFixedWidth(max(310,self.fontMetrics().horizontalAdvance('STA 名义毫秒 · ×50 换算')+80));side=W.QVBoxLayout(sidebar);side.setContentsMargins(0,0,0,0);side.setSpacing(12);side.setSizeConstraint(W.QLayout.SizeConstraint.SetMinimumSize)
         panel,l=self.card();l.addWidget(self.label('设备','section'));self.device_label=self.label('FLIGHT FLA5000');self.device_label.setStyleSheet('font-weight:600');l.addWidget(self.device_label)
         self.serial_label=self.label('USB  f0d0:5001 · 2048 像素','muted');l.addWidget(self.serial_label)
+        self.device_status=self.label('模拟模式' if self.args.demo else '正在寻找光谱仪…','deviceStatus');self.device_status.setWordWrap(True);l.addWidget(self.device_status)
         self.connect_button=W.QPushButton('连接光谱仪');self.connect_button.clicked.connect(self.toggle_connection);l.addWidget(self.connect_button);side.addWidget(panel)
         panel,l=self.card();l.addWidget(self.label('采集控制','section'))
         self.integration_label=self.label('积分时间 · 250');l.addWidget(self.integration_label)
@@ -191,11 +192,12 @@ class Window(W.QMainWindow):
         self.measure_status=self.label('— 帧  ·  — Hz','muted');self.status.addPermanentWidget(self.measure_status)
     def set_controls(self,ready):
         self.ready=ready
+        self.device_status.setProperty("connected",ready);self.device_status.style().unpolish(self.device_status);self.device_status.style().polish(self.device_status)
         self.info_button.setEnabled(ready)
         self.single.setEnabled(ready and not self.busy)
         self.auto_button.setEnabled(ready and not getattr(self,'auto_busy',False))
         self.run.setEnabled(ready)
-        self.connect_button.setEnabled(not getattr(self,'auto_busy',False))
+        self.connect_button.setEnabled((ready or self.device_present) and not self.connecting and not getattr(self,'auto_busy',False))
         running=getattr(self,'continuous',False) or getattr(self,'auto_busy',False);self.run.setText('取消自动积分' if getattr(self,'auto_busy',False) else ('停止采集' if running else '连续采集'));self.run.setObjectName('running' if running else 'primary');self.run.style().unpolish(self.run);self.run.style().polish(self.run)
         self.integration.setEnabled(not getattr(self,'auto_busy',False))
         self.average.setEnabled(not self.busy)
@@ -212,13 +214,34 @@ class Window(W.QMainWindow):
         label=W.QLabel('本页只读。设备校正包含暗背景模板、自动扣暗、分段非线性修正。仅匹配序列号、固件和波长标定时启用；仍为计数，不是绝对辐射定标。不提供校准写入及 GPIO 控制。');label.setWordWrap(True);layout.addWidget(label)
         close=W.QPushButton('关闭');close.clicked.connect(dialog.accept);layout.addWidget(close);dialog.exec()
     def toggle_connection(self):
+        if self.connecting:return
         if self.ready:
-            self.disconnect_request.emit();self.set_controls(False)
-        else:self.connect_request.emit()
+            self.connecting=True;self.disconnect_request.emit();self.set_controls(False)
+        elif self.device_present:
+            self.connecting=True;self.device_status.setText('正在连接…');self.set_controls(False);self.connect_request.emit()
+    @QtCore.Slot(bool)
+    def on_device_available(self,available):
+        self.device_present=available
+        if not self.ready:
+            if not available:self.connecting=False
+            self.device_status.setText('已找到设备 · 未连接' if available else '未找到光谱仪')
+        self.set_controls(self.ready)
+    @QtCore.Slot(bool)
+    def on_connection_changed(self,ready):
+        self.connecting=False
+        if ready:self.device_present=True
+        if not ready:
+            self.auto_busy=False;self.continuous=False;self.busy=False;self.last_time=None
+            self.device_status.setText('已找到设备 · 未连接' if self.device_present else '未找到光谱仪');self.serial_label.setText('设备未连接')
+            self.calibration_label.setText('连接后按序列号匹配校准档案')
+            self.calibration_enabled.setEnabled(False);self.nonlinearity_enabled.setEnabled(False)
+            self.measure_status.setText('已停止 · 保留上次测量' if self.frame_data is not None else '— 帧  ·  — Hz')
+            self.clear_cursor_marker()
+        self.set_controls(ready)
     @QtCore.Slot(object)
     def on_connected(self,data):
         self.connection=data;self.device_label.setText(data['meta']['model']);self.serial_label.setText(f"SN {data['meta']['serial']}  ·  {data['meta']['firmware']}");self.set_controls(True)
-        self.badge.setText('模拟数据 · 非实测' if data['demo'] else 'USB 已连接')
+        self.device_status.setText('模拟数据 · 非实测' if data['demo'] else 'USB 已连接')
         self.profile=None;self.calibration_error=None;self.initial_fit_done=False
         try:self.profile=profile_for(data['meta'])
         except (ValueError,KeyError,OSError) as e:self.calibration_error=str(e)
@@ -230,11 +253,12 @@ class Window(W.QMainWindow):
     def on_state(self,text):
         self.auto_busy=text.startswith('自动积分 ·');self.busy=text in ('连续采集中','单次采集中') or self.auto_busy
         if not self.auto_busy:self.continuous=text=='连续采集中'
-        self.set_controls(self.worker.ready);self.status.showMessage(text)
+        self.set_controls(self.ready);self.status.showMessage(text)
+        if text=="USB 已断开":self.device_status.setText(text)
     @QtCore.Slot(str)
     def on_error(self,text):
-        self.pending_dark=False
-        self.badge.setText('连接异常');self.status.showMessage(text);self.warning_label.setText(text);self.warning_label.show();self.busy=False;self.set_controls(False)
+        self.pending_dark=False;self.connecting=False
+        self.device_status.setText('连接异常');self.status.showMessage(text);self.warning_label.setText(text);self.warning_label.show();self.busy=False;self.set_controls(False)
         if self.args.smoke:print(text,file=sys.stderr);self.args.failed=True;self.close()
     def start(self,continuous):
         p=self.integration.value()

@@ -13,8 +13,12 @@ typedef struct {
  fla5000_anchor anchors[FLA5000_MAX_ANCHORS];
 } fla5000_info;
 /* Errors are negative libusb codes. No firmware/EEPROM writes are exposed. */
+/* 1=matching VID/PID found, 0=absent, negative=libusb error; does not open it. */
+int fla5000_device_present(void);
 int fla5000_open(fla5000 **out, const char *serial);
 void fla5000_close(fla5000 *dev);
+/* Enumerate presence of the opened device; no protocol I/O or sampling. */
+int fla5000_check_connected(fla5000 *dev);
 const fla5000_info *fla5000_get_info(const fla5000 *dev);
 /* Legacy integer parameter, 1..1000. Physical exposure units unverified. */
 int fla5000_set_integration_parameter(fla5000 *dev, unsigned ms);

@@ -11,6 +11,9 @@ class Info(C.Structure):
 class AutoResult(C.Structure):
     _fields_ = [("parameter", C.c_uint), ("iterations", C.c_uint), ("peak", C.c_float), ("status", C.c_int)]
 
+class DeviceDisconnectedError(RuntimeError):
+    pass
+
 class Driver:
     def __init__(self):
         path = Path(os.environ.get("SPECTRADESK_DRIVER", ROOT / "native/libfla5000.so"))
@@ -20,6 +23,10 @@ class Driver:
         l = self.lib
         l.fla5000_open.argtypes = [C.POINTER(C.c_void_p), C.c_char_p]
         l.fla5000_close.argtypes = [C.c_void_p]
+        l.fla5000_check_connected.argtypes = [C.c_void_p]
+        l.fla5000_check_connected.restype = C.c_int
+        l.fla5000_device_present.argtypes = []
+        l.fla5000_device_present.restype = C.c_int
         l.fla5000_get_info.argtypes = [C.c_void_p]; l.fla5000_get_info.restype = C.POINTER(Info)
         l.fla5000_error_name.argtypes = [C.c_int]; l.fla5000_error_name.restype = C.c_char_p
         l.fla5000_set_integration_parameter.argtypes = [C.c_void_p, C.c_uint]
@@ -29,6 +36,8 @@ class Driver:
         self.parameter = None
     def check(self, result):
         if result:
+            if result == -4: # LIBUSB_ERROR_NO_DEVICE
+                raise DeviceDisconnectedError("USB 设备已断开，请插好光谱仪后重新连接。")
             name = self.lib.fla5000_error_name(result).decode()
             raise RuntimeError(f"设备通信失败：{name}。请确认 USB 已从虚拟机释放；异常后重新连接设备。")
     def open(self):
@@ -43,6 +52,14 @@ class Driver:
             return self.meta, self.wave, self.extra
         except Exception:
             self.close(); raise
+    @classmethod
+    def device_available(cls):
+        probe=cls()
+        result=probe.lib.fla5000_device_present()
+        if result<0:probe.check(result)
+        return bool(result)
+    def check_connected(self):
+        self.check(self.lib.fla5000_check_connected(self.handle))
     def set_parameter(self, value):
         self.check(self.lib.fla5000_set_integration_parameter(self.handle, value)); self.parameter=value
     def capture(self, average):

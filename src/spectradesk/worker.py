@@ -2,10 +2,12 @@ from datetime import datetime, timezone
 import time
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
-from .driver import Driver
+from .driver import Driver, DeviceDisconnectedError
 
 class Acquisition(QObject):
     connected=Signal(object)
+    connection_changed=Signal(bool)
+    device_available=Signal(bool)
     frame=Signal(object)
     state=Signal(str)
     error=Signal(str)
@@ -13,11 +15,13 @@ class Acquisition(QObject):
     integration_changed=Signal(int)
     def __init__(self,demo=False):
         super().__init__();self.demo=demo;self.driver=None;self.timer=None;self.running=False;self.ready=False
-        self.parameter=25;self.average=1;self.counter=0;self.auto_timer=None;self.auto_iterator=None
+        self.parameter=25;self.average=1;self.counter=0;self.auto_timer=None;self.auto_iterator=None;self.presence_timer=None;self.discovery_timer=None;self.available=None
     @Slot()
     def connect_device(self):
         try:
             if self.ready:return
+            self.start_discovery()
+            if not self.available:return
             if self.demo:
                 self.wave=np.linspace(279,975,2048,dtype=np.float32)
                 self.extra=((self.wave<365)|(self.wave>872)).astype(np.uint8)
@@ -25,9 +29,44 @@ class Acquisition(QObject):
             else:
                 self.driver=Driver();self.meta,self.wave,self.extra=self.driver.open()
             self.ready=True;self.timer=QTimer(self);self.timer.setInterval(40);self.timer.timeout.connect(self.acquire)
+            if not self.demo:
+                self.presence_timer=QTimer(self);self.presence_timer.setInterval(750)
+                self.presence_timer.timeout.connect(self.check_connection);self.presence_timer.start()
+            self.connection_changed.emit(True)
             self.connected.emit(dict(meta=self.meta,wave=self.wave,extra=self.extra,demo=self.demo))
             self.state.emit("已连接 · 待采集")
         except Exception as e:self.fail(e)
+    def publish_availability(self,available):
+        available=bool(available)
+        changed=self.available is None or self.available!=available
+        self.available=available
+        if changed:self.device_available.emit(available)
+        return changed
+    def start_discovery(self):
+        if self.discovery_timer is None:
+            self.discovery_timer=QTimer(self);self.discovery_timer.setInterval(750)
+            self.discovery_timer.timeout.connect(self.scan_devices)
+        self.discovery_timer.start();self.scan_devices()
+    @Slot()
+    def scan_devices(self):
+        if self.ready or QThread.currentThread().isInterruptionRequested():return
+        try:
+            available=self.demo or Driver.device_available()
+            if self.publish_availability(available):
+                self.state.emit('已找到光谱仪 · 未连接' if available else '未找到光谱仪')
+        except Exception as e:
+            if self.publish_availability(False):self.state.emit('设备检测失败：'+str(e))
+
+    @Slot()
+    def check_connection(self):
+        if not self.ready or self.demo or self.driver is None or self.running or self.auto_iterator is not None:return
+        try:self.driver.check_connected()
+        except Exception as e:self.fail(e)
+
+    def stop_presence_monitor(self):
+        if self.presence_timer:
+            self.presence_timer.stop();self.presence_timer.deleteLater();self.presence_timer=None
+
     @Slot(int,int,bool)
     def start(self,parameter,average,continuous):
         if not self.ready or self.auto_iterator is not None:return
@@ -120,15 +159,20 @@ class Acquisition(QObject):
         self.state.emit("连续采集中" if self.running else "已连接 · 自动积分结束")
 
     def fail(self,e):
+        self.stop_presence_monitor()
         if self.auto_timer:self.auto_timer.stop()
         if self.auto_iterator is not None:self.auto_iterator.close();self.auto_iterator=None
         self.running=False;self.ready=False
         if self.timer:self.timer.stop();self.timer.deleteLater();self.timer=None
         if self.driver:self.driver.close();self.driver=None
-        self.error.emit(str(e));self.state.emit("设备未连接")
+        self.publish_availability(False)
+        self.connection_changed.emit(False)
+        self.error.emit(str(e));self.state.emit("USB 已断开" if isinstance(e,DeviceDisconnectedError) else "设备未连接")
     @Slot()
     def disconnect_device(self):
+        if QThread.currentThread().isInterruptionRequested() and self.discovery_timer:self.discovery_timer.stop()
+        self.stop_presence_monitor()
         self.stop()
         if self.driver:self.driver.close();self.driver=None
         if self.timer:self.timer.deleteLater();self.timer=None
-        self.ready=False;self.state.emit("未连接")
+        self.ready=False;self.connection_changed.emit(False);self.state.emit("未连接")

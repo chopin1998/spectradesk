@@ -31,6 +31,18 @@ static int read_info(fla5000*d){
  }
  return 0;
 }
+/* Discovery only: never open/claim the device or send a sampling command. */
+int fla5000_device_present(void){
+ libusb_context*ctx=NULL;int result=libusb_init(&ctx);if(result)return result;
+ libusb_device**list=NULL;ssize_t n=libusb_get_device_list(ctx,&list);
+ if(n<0){libusb_exit(ctx);return (int)n;}
+ result=0;
+ for(ssize_t i=0;i<n;i++){
+  struct libusb_device_descriptor desc;if(libusb_get_device_descriptor(list[i],&desc))continue;
+  if(desc.idVendor==0xf0d0&&desc.idProduct==0x5001){result=1;break;}
+ }
+ libusb_free_device_list(list,1);libusb_exit(ctx);return result;
+}
 int fla5000_open(fla5000**out,const char*serial){
  if(!out)return LIBUSB_ERROR_INVALID_PARAM;
  *out=NULL;
@@ -53,6 +65,18 @@ end:
  if(r){fla5000_close(d);return r;}*out=d;return 0;
 }
 void fla5000_close(fla5000*d){if(!d)return;if(d->usb){libusb_release_interface(d->usb,0);libusb_close(d->usb);}if(d->ctx)libusb_exit(d->ctx);free(d);}
+/* Check the original device identity, without sending a firmware command.
+ * An unplugged handle must not become valid just because another unit appears. */
+int fla5000_check_connected(fla5000*d){
+ if(!d||!d->usb)return LIBUSB_ERROR_NO_DEVICE;
+ libusb_device**list=NULL;ssize_t n=libusb_get_device_list(d->ctx,&list);
+ if(n<0)return (int)n;
+ libusb_device*original=libusb_get_device(d->usb);
+ int result=LIBUSB_ERROR_NO_DEVICE;
+ for(ssize_t i=0;i<n;i++)if(list[i]==original){result=0;break;}
+ libusb_free_device_list(list,1);
+ return result;
+}
 const fla5000_info*fla5000_get_info(const fla5000*d){return d?&d->info:NULL;}
 const char*fla5000_error_name(int r){return libusb_error_name(r);}
 
