@@ -52,7 +52,7 @@ def test_converges_with_yields_between_frames(app):
     assert any('1/3 帧' in s for s in states)
     assert worker.running
 
-@pytest.mark.parametrize('signal,expected,reason',[(0,1000,'光线过弱'),(2000,15,'光线过强')])
+@pytest.mark.parametrize('signal,expected,reason',[(0,30000,'光线过弱'),(2000,15,'光线过强')])
 def test_unreachable_target_keeps_device_connected(app,signal,expected,reason):
     worker,messages,_=run_auto(app,FakeDriver(signal))
     assert messages[0][0]==expected
@@ -90,3 +90,11 @@ def test_transport_failure_closes_device(app):
     assert errors==['USB timeout']
     assert not worker.ready and driver.closed
     assert worker.auto_iterator is None
+
+
+def test_auto_clamps_high_manual_parameter_before_first_capture():
+    driver=FakeDriver(parameter=65535)
+    steps=driver.auto_steps()
+    assert next(steps)==(1,1,30000)
+    assert driver.parameter==30000
+    steps.close()

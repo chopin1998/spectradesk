@@ -20,7 +20,7 @@ void fla5000_close(fla5000 *dev);
 /* Enumerate presence of the opened device; no protocol I/O or sampling. */
 int fla5000_check_connected(fla5000 *dev);
 const fla5000_info *fla5000_get_info(const fla5000 *dev);
-/* Legacy integer parameter, 1..1000. Physical exposure units unverified. */
+/* Legacy integer parameter, 1..65535. Physical exposure units unverified. */
 int fla5000_set_integration_parameter(fla5000 *dev, unsigned ms);
 /* Raw ADC words in ascending SDK pixel order. Intensity = 32767 - ADC.
  * Call set_integration first. On transfer failure close/reopen device. */

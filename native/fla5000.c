@@ -81,7 +81,7 @@ const fla5000_info*fla5000_get_info(const fla5000*d){return d?&d->info:NULL;}
 const char*fla5000_error_name(int r){return libusb_error_name(r);}
 
 int fla5000_set_integration_parameter(fla5000*d,unsigned ms){
- if(!d || ms<1 || ms>1000)return LIBUSB_ERROR_INVALID_PARAM;
+ if(!d || ms<1 || ms>65535)return LIBUSB_ERROR_INVALID_PARAM;
  d->integration_parameter=0;
  unsigned char cmd[]={2,ms&255,(ms>>8)&255},ack=0;
  int r=exact(d,2,cmd,3,1000);
@@ -102,7 +102,7 @@ int fla5000_capture(fla5000*d,uint16_t pixels[FLA5000_PIXELS]){
  if(!d||!pixels||!d->integration_parameter)return LIBUSB_ERROR_INVALID_PARAM;
  unsigned char cmd[]={1,0},wire[FLA5000_PIXELS*2];
  int r=exact(d,2,cmd,2,1000);
- if(!r)r=exact(d,0x86,wire,sizeof(wire),d->integration_parameter*3+1000);
+ if(!r)r=exact(d,0x86,wire,sizeof(wire),2000+(d->integration_parameter+39)/40);
  if(r){d->integration_parameter=0;return r;}
  return fla5000_decode(wire,sizeof(wire),pixels);
 }

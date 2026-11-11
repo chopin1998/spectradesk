@@ -9,6 +9,7 @@ class Acquisition(QObject):
     connection_changed=Signal(bool)
     device_available=Signal(bool)
     frame=Signal(object)
+    capture_started=Signal(float,int,int)
     state=Signal(str)
     error=Signal(str)
     auto_done=Signal(int,str)
@@ -80,6 +81,10 @@ class Acquisition(QObject):
             self.acquire()
         except Exception as e:self.fail(e)
     @Slot(int)
+    def set_average(self,average):
+        # Queued on the acquisition thread: never split an in-flight group.
+        if 1<=average<=64:self.average=average
+    @Slot(int)
     def set_integration(self,parameter):
         if not self.ready or self.auto_iterator is not None:return
         try:
@@ -92,6 +97,7 @@ class Acquisition(QObject):
         started=time.monotonic()
         try:
             if QThread.currentThread().isInterruptionRequested():return
+            self.capture_started.emit(started,self.parameter,self.average)
             if self.demo:
                 x=self.wave;signal=np.zeros_like(x,dtype=np.float64)
                 for center,width,height in [(405,1.4,650),(436,1.2,3200),(487,4.3,900),(546,1.8,7200),(580,15,1000),(611,1.5,10500),(631,2,650)]:
@@ -139,7 +145,7 @@ class Acquisition(QObject):
         try:
             step,frame,parameter=next(self.auto_iterator)
             self.parameter=parameter;self.integration_changed.emit(parameter)
-            self.state.emit(f"自动积分 · 第 {step}/12 轮 · {frame}/3 帧 · 参数 {parameter}")
+            self.state.emit(f"自动积分 · 第 {step}/16 轮 · {frame}/3 帧 · 参数 {parameter}")
             self.auto_timer.start(0)
         except StopIteration as done:
             parameter,peak,steps,status=done.value;self.parameter=parameter

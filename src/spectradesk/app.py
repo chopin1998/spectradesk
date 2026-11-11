@@ -6,6 +6,7 @@ from PySide6 import QtCore,QtGui,QtWidgets as W
 import pyqtgraph as pg
 from .worker import Acquisition
 from .plot_view import SpectrumViewBox
+from .sampling_indicator import SamplingIndicator
 from .analysis import analyze,display_smooth
 from .storage import save_measurement
 from .calibration import profile_for, correct_counts, sta_smooth
@@ -106,15 +107,15 @@ def acquire_instance_lock(directory=None):
 
 class Window(W.QMainWindow):
     connect_request=QtCore.Signal();disconnect_request=QtCore.Signal()
-    integration_request=QtCore.Signal(int);start_request=QtCore.Signal(int,int,bool);stop_request=QtCore.Signal();auto_request=QtCore.Signal()
+    integration_request=QtCore.Signal(int);average_request=QtCore.Signal(int);start_request=QtCore.Signal(int,int,bool);stop_request=QtCore.Signal();auto_request=QtCore.Signal()
     def __init__(self,args):
-        super().__init__();self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
+        super().__init__();self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self.sampling_context=None;self.capture_started_at=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
         self.setWindowTitle('SpectraDesk · 光谱测量工作台');area=W.QApplication.primaryScreen().availableGeometry();self.resize(min(1560,int(area.width()*.94)),min(1000,int(area.height()*.94)));self.setMinimumSize(1180,760)
         self.build();self.restore_settings()
         self.thread=QtCore.QThread(self);self.worker=Acquisition(args.demo);self.worker.moveToThread(self.thread)
         self.connect_request.connect(self.worker.connect_device);self.disconnect_request.connect(self.worker.disconnect_device)
-        self.integration_request.connect(self.worker.set_integration);self.start_request.connect(self.worker.start);self.stop_request.connect(self.worker.stop);self.auto_request.connect(self.worker.auto)
-        self.worker.device_available.connect(self.on_device_available);self.worker.connection_changed.connect(self.on_connection_changed);self.worker.connected.connect(self.on_connected);self.worker.frame.connect(self.on_frame);self.worker.state.connect(self.on_state);self.worker.error.connect(self.on_error);self.worker.auto_done.connect(self.on_auto);self.worker.integration_changed.connect(self.update_integration)
+        self.average_request.connect(self.worker.set_average);self.integration_request.connect(self.worker.set_integration);self.start_request.connect(self.worker.start);self.stop_request.connect(self.worker.stop);self.auto_request.connect(self.worker.auto)
+        self.worker.device_available.connect(self.on_device_available);self.worker.connection_changed.connect(self.on_connection_changed);self.worker.connected.connect(self.on_connected);self.worker.capture_started.connect(self.on_capture_started);self.worker.frame.connect(self.on_frame);self.worker.state.connect(self.on_state);self.worker.error.connect(self.on_error);self.worker.auto_done.connect(self.on_auto);self.worker.integration_changed.connect(self.update_integration)
         self.thread.finished.connect(self.worker.deleteLater);self.thread.start()
         self.set_controls(False)
         QtCore.QTimer.singleShot(150,self.connect_request.emit)
@@ -139,9 +140,9 @@ class Window(W.QMainWindow):
         self.connect_button=W.QPushButton('连接光谱仪');self.connect_button.clicked.connect(self.toggle_connection);l.addWidget(self.connect_button);side.addWidget(panel)
         panel,l=self.card();l.addWidget(self.label('采集控制','section'))
         self.integration_label=self.label('积分时间 · 250');l.addWidget(self.integration_label)
-        self.integration=W.QSpinBox();self.integration.setRange(15,1000);self.integration.setValue(250);self.integration.setKeyboardTracking(False);self.integration.valueChanged.connect(self.integration_request.emit);self.integration.valueChanged.connect(self.update_integration_label);l.addWidget(self.integration)
+        self.integration=W.QSpinBox();self.integration.setRange(15,65535);self.integration.setValue(250);self.integration.setKeyboardTracking(False);self.integration.valueChanged.connect(self.integration_request.emit);self.integration.valueChanged.connect(self.update_integration_label);l.addWidget(self.integration)
         self.auto_button=W.QPushButton('自动选择积分');self.auto_button.clicked.connect(self.request_auto);l.addWidget(self.auto_button)
-        row=W.QHBoxLayout();row.addWidget(self.label('平均帧数'));self.average=W.QSpinBox();self.average.setRange(1,64);self.average.setValue(2);self.average.setToolTip('这里填写实际采集帧数。已验证 STA 的“平均1”读取两帧，对照时这里选2。');row.addWidget(self.average);l.addLayout(row)
+        row=W.QHBoxLayout();row.addWidget(self.label('平均帧数'));self.average=W.QSpinBox();self.average.setRange(1,64);self.average.setValue(2);self.average.setKeyboardTracking(False);self.average.valueChanged.connect(self.average_request.emit);self.average.setToolTip('这里填写实际采集帧数。已验证 STA 的“平均1”读取两帧，对照时这里选2。');row.addWidget(self.average);l.addLayout(row)
         row=W.QHBoxLayout();self.single=W.QPushButton('单次');self.single.clicked.connect(lambda:self.start(False));self.run=W.QPushButton('连续采集');self.run.setObjectName('primary');self.run.clicked.connect(self.toggle_acquisition);row.addWidget(self.single);row.addWidget(self.run);l.addLayout(row)
         side.addWidget(panel)
         panel,l=self.card();l.addWidget(self.label('显示','section'));self.mode=W.QComboBox();self.mode.addItems(['专业单色线','连续彩虹线','彩虹填充谱']);self.mode.currentIndexChanged.connect(self.render);l.addWidget(self.mode)
@@ -165,13 +166,15 @@ class Window(W.QMainWindow):
         main.addLayout(cards)
         graph,l=self.card();graph.setMinimumHeight(220);l.setContentsMargins(12,10,12,10)
         topline=W.QHBoxLayout();topline.addWidget(self.label('光谱 / SPECTRUM','section'));topline.addStretch();self.cursor_label=self.label('移动鼠标查看波长与强度','muted');topline.addWidget(self.cursor_label);l.addLayout(topline)
-        pg.setConfigOptions(antialias=True,background='#ffffff',foreground='#526477')
+        pg.setConfigOptions(antialias=False,background='#ffffff',foreground='#526477')
         self.spectrum_view=SpectrumViewBox();self.plot=pg.PlotWidget(viewBox=self.spectrum_view);self.plot.setLabel('bottom','Wavelength',units='nm');self.plot.setLabel('left','Intensity',units='counts');self.plot.showGrid(x=True,y=True,alpha=.13);self.plot.setMouseEnabled(x=False,y=False);self.plot.setMenuEnabled(False)
         self.plot.getAxis('left').enableAutoSIPrefix(False);
         for name in ('left','bottom'):
             axis=self.plot.getAxis(name);axis.setTickFont(self.font());axis.label.setFont(self.font())
         self.plot.setXRange(350,950,padding=0);self.plot.setYRange(0,16000,padding=0)
         self.raw_curve=self.plot.plot(pen=pg.mkPen('#abb7c4',width=1));self.curve=self.plot.plot(pen=pg.mkPen('#245b8f',width=1.8));self.markers=pg.ScatterPlotItem(size=7,brush='#a96820',pen=None);self.plot.addItem(self.markers)
+        # Raster drawLines is much cheaper for dense gradient spectra than drawPath.
+        self.curve.curve.setSegmentedLineMode('on');self.raw_curve.curve.setSegmentedLineMode('on')
         self.halfline=self.plot.plot(pen=pg.mkPen('#a96820',width=1,style=QtCore.Qt.PenStyle.DashLine))
         self.cursor_wave=None
         self.cursor_marker=pg.ScatterPlotItem(size=11,symbol='o',pxMode=True,brush='#ffe066',pen=pg.mkPen('#805615',width=1.5))
@@ -189,6 +192,7 @@ class Window(W.QMainWindow):
         l.addLayout(top);self.table=W.QTableWidget(0,4);self.table.setHorizontalHeaderLabels(['峰位 / nm','强度 / counts','FWHM / nm','质量提示']);self.table.horizontalHeader().setSectionResizeMode(W.QHeaderView.ResizeMode.Stretch);self.table.verticalHeader().hide();self.table.setEditTriggers(W.QAbstractItemView.EditTrigger.NoEditTriggers);self.table.setSelectionBehavior(W.QAbstractItemView.SelectionBehavior.SelectRows);self.table.verticalHeader().setDefaultSectionSize(self.fontMetrics().height()+12);self.table.setMinimumHeight(120);self.table.setMaximumHeight(200);self.table.setAlternatingRowColors(True);l.addWidget(self.table)
         main.addWidget(panel)
         self.status=self.statusBar();self.status.showMessage('正在寻找光谱仪…')
+        self.sampling_indicator=SamplingIndicator();self.status.addPermanentWidget(self.sampling_indicator)
         self.measure_status=self.label('— 帧  ·  — Hz','muted');self.status.addPermanentWidget(self.measure_status)
     def set_controls(self,ready):
         self.ready=ready
@@ -200,7 +204,7 @@ class Window(W.QMainWindow):
         self.connect_button.setEnabled((ready or self.device_present) and not self.connecting and not getattr(self,'auto_busy',False))
         running=getattr(self,'continuous',False) or getattr(self,'auto_busy',False);self.run.setText('取消自动积分' if getattr(self,'auto_busy',False) else ('停止采集' if running else '连续采集'));self.run.setObjectName('running' if running else 'primary');self.run.style().unpolish(self.run);self.run.style().polish(self.run)
         self.integration.setEnabled(not getattr(self,'auto_busy',False))
-        self.average.setEnabled(not self.busy)
+        self.average.setEnabled(not getattr(self,'auto_busy',False))
         self.connect_button.setText('断开设备' if ready else '连接光谱仪')
         self.connect_button.setObjectName('disconnect' if ready else 'connect')
         self.connect_button.style().unpolish(self.connect_button);self.connect_button.style().polish(self.connect_button)
@@ -231,7 +235,7 @@ class Window(W.QMainWindow):
         self.connecting=False
         if ready:self.device_present=True
         if not ready:
-            self.auto_busy=False;self.continuous=False;self.busy=False;self.last_time=None
+            self.auto_busy=False;self.continuous=False;self.busy=False;self.last_time=None;self.sampling_context=None;self.capture_started_at=None;self.sampling_indicator.reset()
             self.device_status.setText('已找到设备 · 未连接' if self.device_present else '未找到光谱仪');self.serial_label.setText('设备未连接')
             self.calibration_label.setText('连接后按序列号匹配校准档案')
             self.calibration_enabled.setEnabled(False);self.nonlinearity_enabled.setEnabled(False)
@@ -254,14 +258,16 @@ class Window(W.QMainWindow):
         self.auto_busy=text.startswith('自动积分 ·');self.busy=text in ('连续采集中','单次采集中') or self.auto_busy
         if not self.auto_busy:self.continuous=text=='连续采集中'
         self.set_controls(self.ready);self.status.showMessage(text)
+        if not self.busy or self.auto_busy:
+            self.sampling_indicator.stop();self.last_time=None
         if text=="USB 已断开":self.device_status.setText(text)
     @QtCore.Slot(str)
     def on_error(self,text):
-        self.pending_dark=False;self.connecting=False
+        self.pending_dark=False;self.connecting=False;self.sampling_indicator.stop();self.last_time=None
         self.device_status.setText('连接异常');self.status.showMessage(text);self.warning_label.setText(text);self.warning_label.show();self.busy=False;self.set_controls(False)
         if self.args.smoke:print(text,file=sys.stderr);self.args.failed=True;self.close()
     def start(self,continuous):
-        p=self.integration.value()
+        p=self.integration.value();self.last_time=None
         self.busy=True;self.set_controls(self.ready);self.start_request.emit(p,self.average.value(),continuous)
     @QtCore.Slot(int)
     def update_integration_label(self,parameter):
@@ -275,11 +281,22 @@ class Window(W.QMainWindow):
     @QtCore.Slot(int,str)
     def on_auto(self,p,text):
         self.update_integration(p);self.persist_settings();self.warning_label.setText(text);self.warning_label.setVisible(bool(text))
+    @QtCore.Slot(float,int,int)
+    def on_capture_started(self,started,parameter,average):
+        context=(parameter,average)
+        changed=context!=self.sampling_context
+        if changed:self.last_time=None
+        self.sampling_context=context;self.capture_started_at=started
+        self.sampling_indicator.begin(started,reset=changed)
+        if self.sampling_indicator.period is None:self.measure_status.setText('采样中…')
     @QtCore.Slot(object)
     def on_frame(self,frame):
         self.frame_data=frame;self.save_button.setEnabled(True)
-        now=time.monotonic();hz=0 if self.last_time is None else 1/max(now-self.last_time,1e-6);self.last_time=now
-        self.measure_status.setText(f"{frame['index']} 帧  ·  {hz:.1f} Hz  ·  读取 {frame['elapsed']*1000:.1f} ms")
+        now=time.monotonic() if self.capture_started_at is None else self.capture_started_at+frame['elapsed']
+        period=max(frame['elapsed'],1e-6) if self.last_time is None else max(now-self.last_time,1e-6)
+        self.last_time=now;self.sampling_indicator.complete(period)
+        rate=f'  ·  {1/period:.1f} Hz' if period<=.2 else ''
+        self.measure_status.setText(f"{frame['index']} 帧{rate}  ·  读取 {frame['elapsed']*1000:.1f} ms")
         self.render()
         if self.args.smoke and not getattr(self,'smoke_scheduled',False):
             self.smoke_scheduled=True;QtCore.QTimer.singleShot(200,self.finish_smoke)
@@ -296,23 +313,27 @@ class Window(W.QMainWindow):
         self.corrected=y;self.displayed=shown;self.applied_dark=dark
         self.raw_curve.setData(x,y if self.overlay.isChecked() and self.smooth.value() else np.full_like(y,np.nan))
         index=self.mode.currentIndex()
-        if index:
-            gradient=QtGui.QLinearGradient(380,0,780,0)
-            for value,color in [(0,'#9068e9'),(.15,'#6588ff'),(.25,'#48d5ec'),(.375,'#78e59d'),(.5,'#e5e472'),(.625,'#f3aa67'),(.8,'#ed6e75'),(1,'#ae556b')]:gradient.setColorAt(value,QtGui.QColor(color))
-            pen=QtGui.QPen(QtGui.QBrush(gradient),1.8);pen.setCosmetic(True);self.curve.setPen(pen)
-            if index==2:
-                for stop,color in gradient.stops():color.setAlpha(65);gradient.setColorAt(stop,color)
-                self.curve.setFillLevel(0);self.curve.setBrush(QtGui.QBrush(gradient))
-            else:self.curve.setFillLevel(None)
-        else:self.curve.setPen(pg.mkPen('#84b9ed' if self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark) else '#245b8f',width=1.8));self.curve.setFillLevel(None)
+        style_key=(index,self.theme.currentText(),W.QApplication.instance().styleHints().colorScheme())
+        if getattr(self,'curve_style_key',None)!=style_key:
+            self.curve_style_key=style_key
+            if index:
+                gradient=QtGui.QLinearGradient(380,0,780,0)
+                for value,color in [(0,'#9068e9'),(.15,'#6588ff'),(.25,'#48d5ec'),(.375,'#78e59d'),(.5,'#e5e472'),(.625,'#f3aa67'),(.8,'#ed6e75'),(1,'#ae556b')]:gradient.setColorAt(value,QtGui.QColor(color))
+                pen=QtGui.QPen(QtGui.QBrush(gradient),1.8);pen.setCosmetic(True);self.curve.setPen(pen)
+                if index==2:
+                    for stop,color in gradient.stops():color.setAlpha(65);gradient.setColorAt(stop,color)
+                    self.curve.setFillLevel(0);self.curve.setBrush(QtGui.QBrush(gradient))
+                else:self.curve.setFillLevel(None)
+            else:self.curve.setPen(pg.mkPen('#84b9ed' if self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark) else '#245b8f',width=1.8));self.curve.setFillLevel(None)
         self.curve.setData(x,shown)
         self.fit_display()
         self.update_cursor_marker()
         self.peaks=analyze(x,y,self.range_start.value(),self.range_end.value())
         clipped=bool(np.any((32767-f['adc_frames'].astype(np.int32))[:,10:2041]>=16500))
         if clipped:
+            peak_max=float(np.max(y))
             for p in self.peaks:
-                if p.intensity>=.85*max(y):p.fwhm=None;p.warning='原始帧可能削顶，半高宽无效'
+                if p.intensity>=.85*peak_max:p.fwhm=None;p.warning='原始帧可能削顶，半高宽无效'
         self.markers.setData([p.wavelength for p in self.peaks],[p.intensity for p in self.peaks])
         if self.peaks:
             p=self.peaks[0];self.metric_labels[0].setText(f'{p.wavelength:.2f}');self.metric_labels[1].setText('—' if p.fwhm is None else f'{p.fwhm:.2f}');self.metric_labels[2].setText(f'{p.intensity:,.0f}')
@@ -340,7 +361,8 @@ class Window(W.QMainWindow):
         mask=(x>=low)&(x<=high)&np.isfinite(y)
         if not np.any(mask):
             self.navigation_label.setText('所选范围内没有采样点');return
-        values=y[mask];bottom=min(0.,float(values.min()));top=max(1.,float(values.max()))
+        values=y[mask];bottom=min(0.,float(values.min()));top=max(bottom+200.,float(values.max()))
+        # A display-only floor keeps dark noise from filling the entire plot.
         context=(low,high,self.frame_data['parameter'],self.smooth.value(),self.processing.get('method'),self.processing.get('nonlinearity'))
         now=time.monotonic();desired=(bottom-max(1.,(top-bottom)*.05),top+max(1.,(top-bottom)*.05))
         if getattr(self,'axis_context',None)!=context:
@@ -443,6 +465,7 @@ class Window(W.QMainWindow):
     def smoke_timeout(self):
         if not getattr(self.args,'finished',False):self.args.failed=True;print('Smoke timeout',file=sys.stderr);self.close()
     def closeEvent(self,event):
+        self.sampling_indicator.stop()
         self.persist_settings()
         self.thread.requestInterruption()
         if self.thread.isRunning():

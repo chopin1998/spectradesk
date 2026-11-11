@@ -43,12 +43,12 @@ int fla5000_measure(fla5000 *dev, unsigned average, unsigned radius,
 }
 int fla5000_auto(fla5000 *dev, unsigned start, float target,
                  fla5000_auto_result *result) {
-    if (!dev || !result || start < 15 || start > 1000 ||
+    if (!dev || !result || start < 15 || start > 65535 ||
         !isfinite(target) || target < 4000 || target > 14000)
         return LIBUSB_ERROR_INVALID_PARAM;
     memset(result, 0, sizeof(*result));
-    unsigned parameter = start;
-    for (unsigned step = 0; step < 12; ++step) {
+    unsigned parameter = start > 30000 ? 30000 : start;
+    for (unsigned step = 0; step < 16; ++step) {
         int r = fla5000_set_integration_parameter(dev, parameter);
         if (r) return r;
         result->parameter = parameter;
@@ -74,9 +74,9 @@ int fla5000_auto(fla5000 *dev, unsigned start, float target,
         if (ratio > 2.0) ratio = 2.0;
         unsigned next = (unsigned)floor(parameter * ratio + 0.5);
         if (next < 15) next = 15;
-        if (next > 1000) next = 1000;
+        if (next > 30000) next = 30000;
         if (next == parameter) {
-            result->status = parameter == 15 ? 1 : (parameter == 1000 ? 2 : 3);
+            result->status = parameter == 15 ? 1 : (parameter == 30000 ? 2 : 3);
             return 0;
         }
         parameter = next;

@@ -70,9 +70,9 @@ class Driver:
         return frames
     def auto_steps(self):
         """Yield after each USB frame so the worker can process cancellation."""
-        parameter=self.parameter if self.parameter is not None else 25
+        parameter=min(self.parameter if self.parameter is not None else 25,30000)
         target=12000
-        for step in range(1,13):
+        for step in range(1,17):
             self.set_parameter(parameter)
             frames=[]
             for frame in range(1,4):
@@ -84,11 +84,11 @@ class Driver:
                 return parameter,peak,step,0
             baseline=float(np.mean(mean[10:70]))
             ratio=.5 if peak>=16500 else (target-baseline)/max(peak-baseline,1.)
-            next_parameter=int(np.clip(np.floor(parameter*np.clip(ratio,.5,2.)+.5),15,1000))
+            next_parameter=int(np.clip(np.floor(parameter*np.clip(ratio,.5,2.)+.5),15,30000))
             if next_parameter==parameter:
-                return parameter,peak,step,1 if parameter==15 else (2 if parameter==1000 else 3)
+                return parameter,peak,step,1 if parameter==15 else (2 if parameter==30000 else 3)
             parameter=next_parameter
-        return self.parameter,peak,12,3
+        return self.parameter,peak,16,3
 
     def auto(self):
         steps=self.auto_steps()
