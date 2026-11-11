@@ -22,7 +22,7 @@ def verify():
             before=y.copy()
             win.frame_data=dict(wave=x,mean=y,extra=np.zeros(2048),adc_frames=np.full((2,2048),32760,dtype=np.uint16),parameter=parameter,average=2,demo=True,device=dict(serial='test'),index=1,elapsed=.1)
             win.smooth.setValue(1)
-            for mode in range(3):
+            for mode in range(4):
                 win.mode.setCurrentIndex(mode);win.render();app.processEvents()
                 assert np.array_equal(y,before)
                 assert np.allclose(win.curve.getData()[1],display_smooth(y,1))

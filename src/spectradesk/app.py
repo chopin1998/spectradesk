@@ -7,6 +7,7 @@ import pyqtgraph as pg
 from .worker import Acquisition
 from .plot_view import SpectrumViewBox
 from .sampling_indicator import SamplingIndicator
+from .phosphor import PhosphorImage
 from .analysis import analyze,display_smooth
 from .storage import save_measurement
 from .calibration import profile_for, correct_counts, sta_smooth
@@ -145,7 +146,7 @@ class Window(W.QMainWindow):
         row=W.QHBoxLayout();row.addWidget(self.label('平均帧数'));self.average=W.QSpinBox();self.average.setRange(1,64);self.average.setValue(2);self.average.setKeyboardTracking(False);self.average.valueChanged.connect(self.average_request.emit);self.average.setToolTip('这里填写实际采集帧数。已验证 STA 的“平均1”读取两帧，对照时这里选2。');row.addWidget(self.average);l.addLayout(row)
         row=W.QHBoxLayout();self.single=W.QPushButton('单次');self.single.clicked.connect(lambda:self.start(False));self.run=W.QPushButton('连续采集');self.run.setObjectName('primary');self.run.clicked.connect(self.toggle_acquisition);row.addWidget(self.single);row.addWidget(self.run);l.addLayout(row)
         side.addWidget(panel)
-        panel,l=self.card();l.addWidget(self.label('显示','section'));self.mode=W.QComboBox();self.mode.addItems(['专业单色线','连续彩虹线','彩虹填充谱']);self.mode.currentIndexChanged.connect(self.render);l.addWidget(self.mode)
+        panel,l=self.card();l.addWidget(self.label('显示','section'));self.mode=W.QComboBox();self.mode.addItems(['专业单色线','连续彩虹线','彩虹填充谱','荧光余辉']);self.mode.currentIndexChanged.connect(self.render);l.addWidget(self.mode)
         row=W.QHBoxLayout();row.addWidget(self.label('平滑'));self.smooth=W.QSpinBox();self.smooth.setRange(0,50);self.smooth.setSpecialValueText('关闭');self.smooth.setValue(1);self.smooth.setToolTip('N 对应 2N 个点，仅影响显示与STA对照导出；分析使用未平滑校正数据。设备校正模式复现STA尾部不平滑规则。');self.smooth.valueChanged.connect(self.render);row.addWidget(self.smooth);l.addLayout(row)
         self.overlay=W.QCheckBox('叠加未平滑曲线');self.overlay.setChecked(True);self.overlay.toggled.connect(self.render);l.addWidget(self.overlay)
         l.addWidget(self.label('显示波长范围 / nm'))
@@ -167,7 +168,7 @@ class Window(W.QMainWindow):
         graph,l=self.card();graph.setMinimumHeight(220);l.setContentsMargins(12,10,12,10)
         topline=W.QHBoxLayout();topline.addWidget(self.label('光谱 / SPECTRUM','section'));topline.addStretch();self.cursor_label=self.label('移动鼠标查看波长与强度','muted');topline.addWidget(self.cursor_label);l.addLayout(topline)
         pg.setConfigOptions(antialias=False,background='#ffffff',foreground='#526477')
-        self.spectrum_view=SpectrumViewBox();self.plot=pg.PlotWidget(viewBox=self.spectrum_view);self.plot.setLabel('bottom','Wavelength',units='nm');self.plot.setLabel('left','Intensity',units='counts');self.plot.showGrid(x=True,y=True,alpha=.13);self.plot.setMouseEnabled(x=False,y=False);self.plot.setMenuEnabled(False)
+        self.spectrum_view=SpectrumViewBox();self.plot=pg.PlotWidget(viewBox=self.spectrum_view);self.plot.useOpenGL(getattr(self.args,'renderer','raster')=='opengl');self.plot.setLabel('bottom','Wavelength',units='nm');self.plot.setLabel('left','Intensity',units='counts');self.plot.showGrid(x=True,y=True,alpha=.13);self.plot.setMouseEnabled(x=False,y=False);self.plot.setMenuEnabled(False)
         self.plot.getAxis('left').enableAutoSIPrefix(False);
         for name in ('left','bottom'):
             axis=self.plot.getAxis(name);axis.setTickFont(self.font());axis.label.setFont(self.font())
@@ -175,6 +176,9 @@ class Window(W.QMainWindow):
         self.raw_curve=self.plot.plot(pen=pg.mkPen('#abb7c4',width=1));self.curve=self.plot.plot(pen=pg.mkPen('#245b8f',width=1.8));self.markers=pg.ScatterPlotItem(size=7,brush='#a96820',pen=None);self.plot.addItem(self.markers)
         # Raster drawLines is much cheaper for dense gradient spectra than drawPath.
         self.curve.curve.setSegmentedLineMode('on');self.raw_curve.curve.setSegmentedLineMode('on')
+        self.phosphor=PhosphorImage();self.phosphor.hide();self.plot.addItem(self.phosphor,ignoreBounds=True)
+        if getattr(self.args,'renderer','raster')=='cached-image':
+            for item in (self.curve.curve,self.raw_curve.curve):item.setCacheMode(W.QGraphicsItem.CacheMode.DeviceCoordinateCache)
         self.halfline=self.plot.plot(pen=pg.mkPen('#a96820',width=1,style=QtCore.Qt.PenStyle.DashLine))
         self.cursor_wave=None
         self.cursor_marker=pg.ScatterPlotItem(size=11,symbol='o',pxMode=True,brush='#ffe066',pen=pg.mkPen('#805615',width=1.5))
@@ -316,7 +320,11 @@ class Window(W.QMainWindow):
         style_key=(index,self.theme.currentText(),W.QApplication.instance().styleHints().colorScheme())
         if getattr(self,'curve_style_key',None)!=style_key:
             self.curve_style_key=style_key
-            if index:
+            dark=self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark)
+            self.plot.setBackground('#071b16' if index==3 else ('#18212c' if dark else '#ffffff'))
+            if index==3:
+                self.curve.setPen(pg.mkPen('#8affce',width=1.5));self.curve.setFillLevel(None)
+            elif index:
                 gradient=QtGui.QLinearGradient(380,0,780,0)
                 for value,color in [(0,'#9068e9'),(.15,'#6588ff'),(.25,'#48d5ec'),(.375,'#78e59d'),(.5,'#e5e472'),(.625,'#f3aa67'),(.8,'#ed6e75'),(1,'#ae556b')]:gradient.setColorAt(value,QtGui.QColor(color))
                 pen=QtGui.QPen(QtGui.QBrush(gradient),1.8);pen.setCosmetic(True);self.curve.setPen(pen)
@@ -327,6 +335,10 @@ class Window(W.QMainWindow):
             else:self.curve.setPen(pg.mkPen('#84b9ed' if self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark) else '#245b8f',width=1.8));self.curve.setFillLevel(None)
         self.curve.setData(x,shown)
         self.fit_display()
+        if index==3:
+            xr,yr=self.spectrum_view.viewRange()
+            self.phosphor.update_spectrum(x,shown,(xr[0],xr[1],yr[0],yr[1]))
+        elif self.phosphor.isVisible():self.phosphor.reset()
         self.update_cursor_marker()
         self.peaks=analyze(x,y,self.range_start.value(),self.range_end.value())
         clipped=bool(np.any((32767-f['adc_frames'].astype(np.int32))[:,10:2041]>=16500))
@@ -429,6 +441,8 @@ class Window(W.QMainWindow):
             box=getattr(self,name);box.setCurrentIndex(int(store.value(name,0)));box.currentIndexChanged.connect(self.persist_settings)
         for name in ('overlay','calibration_enabled','nonlinearity_enabled'):
             box=getattr(self,name);box.setChecked(store.value(name,True,type=bool));box.toggled.connect(self.persist_settings)
+        if getattr(self.args,'renderer','raster')=='opengl':
+            self.mode.setCurrentIndex(0);self.mode.setEnabled(False)
         self.restoring=False;self.change_theme()
         W.QApplication.instance().styleHints().colorSchemeChanged.connect(lambda *_:self.change_theme())
     def change_theme(self,*_):
@@ -474,7 +488,7 @@ class Window(W.QMainWindow):
         event.accept()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--demo',action='store_true');parser.add_argument('--connect',action='store_true',help='Connect on startup (now the default; does not start acquisition)');parser.add_argument('--smoke',help='Save screenshot and one measurement then exit');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--renderer',choices=['raster','opengl','cached-image'],default='raster',help='Experimental drawing backend; OpenGL currently supports monochrome only');parser.add_argument('--demo',action='store_true');parser.add_argument('--connect',action='store_true',help='Connect on startup (now the default; does not start acquisition)');parser.add_argument('--smoke',help='Save screenshot and one measurement then exit');args=parser.parse_args()
     app=W.QApplication(sys.argv[:1]);app.setApplicationName('SpectraDesk')
     instance_lock=acquire_instance_lock()
     if instance_lock is None:
