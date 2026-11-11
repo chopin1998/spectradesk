@@ -447,6 +447,8 @@ class Window(W.QMainWindow):
             box=getattr(self,name);box.setCurrentIndex(int(store.value(name,0)));box.currentIndexChanged.connect(self.persist_settings)
         for name in ('overlay','calibration_enabled','nonlinearity_enabled'):
             box=getattr(self,name);box.setChecked(store.value(name,True,type=bool));box.toggled.connect(self.persist_settings)
+        geometry=store.value('window/geometry',QtCore.QByteArray())
+        if isinstance(geometry,QtCore.QByteArray) and not geometry.isEmpty():self.restoreGeometry(geometry)
         self.restoring=False;self.change_theme()
         W.QApplication.instance().styleHints().colorSchemeChanged.connect(lambda *_:self.change_theme())
     def change_theme(self,*_):
@@ -490,6 +492,7 @@ class Window(W.QMainWindow):
     def closeEvent(self,event):
         self.sampling_indicator.stop()
         self.persist_settings()
+        store=QtCore.QSettings('SpectraDesk','SpectraDesk');store.setValue('window/geometry',self.saveGeometry());store.sync()
         self.thread.requestInterruption()
         if self.thread.isRunning():
             QtCore.QMetaObject.invokeMethod(self.worker,'disconnect_device',QtCore.Qt.ConnectionType.BlockingQueuedConnection)
