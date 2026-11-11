@@ -8,6 +8,7 @@ from .worker import Acquisition
 from .plot_view import SpectrumViewBox
 from .sampling_indicator import SamplingIndicator
 from .phosphor import PhosphorImage
+from .gpu_curve import GpuSpectrumCurve
 from .analysis import analyze,display_smooth
 from .storage import save_measurement
 from .calibration import profile_for, correct_counts, sta_smooth
@@ -173,7 +174,11 @@ class Window(W.QMainWindow):
         for name in ('left','bottom'):
             axis=self.plot.getAxis(name);axis.setTickFont(self.font());axis.label.setFont(self.font())
         self.plot.setXRange(350,950,padding=0);self.plot.setYRange(0,16000,padding=0)
-        self.raw_curve=self.plot.plot(pen=pg.mkPen('#abb7c4',width=1));self.curve=self.plot.plot(pen=pg.mkPen('#245b8f',width=1.8));self.markers=pg.ScatterPlotItem(size=7,brush='#a96820',pen=None);self.plot.addItem(self.markers)
+        self.raw_curve=self.plot.plot(pen=pg.mkPen('#abb7c4',width=1))
+        if getattr(self.args,'renderer','raster')=='opengl':
+            self.curve=GpuSpectrumCurve(pen=pg.mkPen('#245b8f',width=1.8));self.plot.addItem(self.curve)
+        else:self.curve=self.plot.plot(pen=pg.mkPen('#245b8f',width=1.8))
+        self.markers=pg.ScatterPlotItem(size=7,brush='#a96820',pen=None);self.plot.addItem(self.markers)
         # Raster drawLines is much cheaper for dense gradient spectra than drawPath.
         self.curve.curve.setSegmentedLineMode('on');self.raw_curve.curve.setSegmentedLineMode('on')
         self.phosphor=PhosphorImage();self.phosphor.hide();self.plot.addItem(self.phosphor,ignoreBounds=True)
@@ -317,6 +322,7 @@ class Window(W.QMainWindow):
         self.corrected=y;self.displayed=shown;self.applied_dark=dark
         self.raw_curve.setData(x,y if self.overlay.isChecked() and self.smooth.value() else np.full_like(y,np.nan))
         index=self.mode.currentIndex()
+        if isinstance(self.curve,GpuSpectrumCurve):self.curve.effect=index
         style_key=(index,self.theme.currentText(),W.QApplication.instance().styleHints().colorScheme())
         if getattr(self,'curve_style_key',None)!=style_key:
             self.curve_style_key=style_key
@@ -335,7 +341,7 @@ class Window(W.QMainWindow):
             else:self.curve.setPen(pg.mkPen('#84b9ed' if self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark) else '#245b8f',width=1.8));self.curve.setFillLevel(None)
         self.curve.setData(x,shown)
         self.fit_display()
-        if index==3:
+        if index==3 and not isinstance(self.curve,GpuSpectrumCurve):
             xr,yr=self.spectrum_view.viewRange()
             self.phosphor.update_spectrum(x,shown,(xr[0],xr[1],yr[0],yr[1]))
         elif self.phosphor.isVisible():self.phosphor.reset()
@@ -441,8 +447,6 @@ class Window(W.QMainWindow):
             box=getattr(self,name);box.setCurrentIndex(int(store.value(name,0)));box.currentIndexChanged.connect(self.persist_settings)
         for name in ('overlay','calibration_enabled','nonlinearity_enabled'):
             box=getattr(self,name);box.setChecked(store.value(name,True,type=bool));box.toggled.connect(self.persist_settings)
-        if getattr(self.args,'renderer','raster')=='opengl':
-            self.mode.setCurrentIndex(0);self.mode.setEnabled(False)
         self.restoring=False;self.change_theme()
         W.QApplication.instance().styleHints().colorSchemeChanged.connect(lambda *_:self.change_theme())
     def change_theme(self,*_):
@@ -488,7 +492,7 @@ class Window(W.QMainWindow):
         event.accept()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--renderer',choices=['raster','opengl','cached-image'],default='raster',help='Experimental drawing backend; OpenGL currently supports monochrome only');parser.add_argument('--demo',action='store_true');parser.add_argument('--connect',action='store_true',help='Connect on startup (now the default; does not start acquisition)');parser.add_argument('--smoke',help='Save screenshot and one measurement then exit');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--renderer',choices=['raster','opengl','cached-image'],default='raster',help='Experimental drawing backend');parser.add_argument('--demo',action='store_true');parser.add_argument('--connect',action='store_true',help='Connect on startup (now the default; does not start acquisition)');parser.add_argument('--smoke',help='Save screenshot and one measurement then exit');args=parser.parse_args()
     app=W.QApplication(sys.argv[:1]);app.setApplicationName('SpectraDesk')
     instance_lock=acquire_instance_lock()
     if instance_lock is None:
