@@ -13,7 +13,7 @@ from spectradesk.worker import Acquisition
 # Exercise default startup with a simulated device behind the real worker.
 module.Acquisition=lambda demo: Acquisition(True)
 app=QtWidgets.QApplication([])
-win=module.Window(Namespace(demo=False,connect=False,smoke=None));win.show()
+win=module.Window(Namespace(demo=False,connect=False,smoke=None,renderer='raster'));win.show()
 errors=[]
 def verify():
     try:

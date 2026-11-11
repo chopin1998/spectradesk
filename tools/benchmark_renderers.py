@@ -40,7 +40,8 @@ try:
    if signal=='peak' and len(sys.argv)>2:
     screenshot=Path(sys.argv[2]);screenshot=screenshot.with_name(screenshot.stem+f'-{mode}'+screenshot.suffix)
     QtTest.QTest.qWait(50)
-    app.primaryScreen().grabWindow(int(win.winId())).save(str(screenshot))
+    win.plot.viewport().repaint()
+    win.curve.capture_viewport(win.plot.viewport()).save(str(screenshot)) if backend=='opengl' else win.plot.viewport().grab().save(str(screenshot))
 finally:
  win.close()
 print(json.dumps(results),flush=True)

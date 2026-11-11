@@ -169,20 +169,20 @@ class Window(W.QMainWindow):
         graph,l=self.card();graph.setMinimumHeight(220);l.setContentsMargins(12,10,12,10)
         topline=W.QHBoxLayout();topline.addWidget(self.label('光谱 / SPECTRUM','section'));topline.addStretch();self.cursor_label=self.label('移动鼠标查看波长与强度','muted');topline.addWidget(self.cursor_label);l.addLayout(topline)
         pg.setConfigOptions(antialias=False,background='#ffffff',foreground='#526477')
-        self.spectrum_view=SpectrumViewBox();self.plot=pg.PlotWidget(viewBox=self.spectrum_view);self.plot.useOpenGL(getattr(self.args,'renderer','raster')=='opengl');self.plot.setLabel('bottom','Wavelength',units='nm');self.plot.setLabel('left','Intensity',units='counts');self.plot.showGrid(x=True,y=True,alpha=.13);self.plot.setMouseEnabled(x=False,y=False);self.plot.setMenuEnabled(False)
+        self.spectrum_view=SpectrumViewBox();self.plot=pg.PlotWidget(viewBox=self.spectrum_view);self.plot.useOpenGL(getattr(self.args,'renderer','opengl')=='opengl');self.plot.setLabel('bottom','Wavelength',units='nm');self.plot.setLabel('left','Intensity',units='counts');self.plot.showGrid(x=True,y=True,alpha=.13);self.plot.setMouseEnabled(x=False,y=False);self.plot.setMenuEnabled(False)
         self.plot.getAxis('left').enableAutoSIPrefix(False);
         for name in ('left','bottom'):
             axis=self.plot.getAxis(name);axis.setTickFont(self.font());axis.label.setFont(self.font())
         self.plot.setXRange(350,950,padding=0);self.plot.setYRange(0,16000,padding=0)
         self.raw_curve=self.plot.plot(pen=pg.mkPen('#abb7c4',width=1))
-        if getattr(self.args,'renderer','raster')=='opengl':
+        if getattr(self.args,'renderer','opengl')=='opengl':
             self.curve=GpuSpectrumCurve(pen=pg.mkPen('#245b8f',width=1.8));self.plot.addItem(self.curve)
         else:self.curve=self.plot.plot(pen=pg.mkPen('#245b8f',width=1.8))
         self.markers=pg.ScatterPlotItem(size=7,brush='#a96820',pen=None);self.plot.addItem(self.markers)
         # Raster drawLines is much cheaper for dense gradient spectra than drawPath.
         self.curve.curve.setSegmentedLineMode('on');self.raw_curve.curve.setSegmentedLineMode('on')
         self.phosphor=PhosphorImage();self.phosphor.hide();self.plot.addItem(self.phosphor,ignoreBounds=True)
-        if getattr(self.args,'renderer','raster')=='cached-image':
+        if getattr(self.args,'renderer','opengl')=='cached-image':
             for item in (self.curve.curve,self.raw_curve.curve):item.setCacheMode(W.QGraphicsItem.CacheMode.DeviceCoordinateCache)
         self.halfline=self.plot.plot(pen=pg.mkPen('#a96820',width=1,style=QtCore.Qt.PenStyle.DashLine))
         self.cursor_wave=None
@@ -354,7 +354,7 @@ class Window(W.QMainWindow):
                 if p.intensity>=.85*peak_max:p.fwhm=None;p.warning='原始帧可能削顶，半高宽无效'
         self.markers.setData([p.wavelength for p in self.peaks],[p.intensity for p in self.peaks])
         if self.peaks:
-            p=self.peaks[0];self.metric_labels[0].setText(f'{p.wavelength:.2f}');self.metric_labels[1].setText('—' if p.fwhm is None else f'{p.fwhm:.2f}');self.metric_labels[2].setText(f'{p.intensity:,.0f}')
+            p=self.peaks[0];self.metric_labels[0].setText(f'{p.wavelength:.1f}');self.metric_labels[1].setText('—' if p.fwhm is None else f'{p.fwhm:.1f}');self.metric_labels[2].setText(f'{p.intensity:,.0f}')
             if p.fwhm is not None:self.halfline.setData([p.left,p.right],[p.baseline+(p.intensity-p.baseline)/2]*2)
             else:self.halfline.setData([],[])
         else:
@@ -362,7 +362,7 @@ class Window(W.QMainWindow):
             self.halfline.setData([],[])
         self.table.setRowCount(len(self.peaks))
         for row,p in enumerate(self.peaks):
-            for col,text in enumerate([f'{p.wavelength:.2f}',f'{p.intensity:.1f}','—' if p.fwhm is None else f'{p.fwhm:.2f}',p.warning or '可分析']):self.table.setItem(row,col,W.QTableWidgetItem(text))
+            for col,text in enumerate([f'{p.wavelength:.1f}',f'{p.intensity:.1f}','—' if p.fwhm is None else f'{p.fwhm:.1f}',p.warning or '可分析']):self.table.setItem(row,col,W.QTableWidgetItem(text))
         notes=[]
         if clipped:notes.insert(0,'⚠ 原始帧接近实测削顶水平')
         if self.range_start.value()>=self.range_end.value():notes.insert(0,'分析起点必须小于终点')
@@ -413,7 +413,7 @@ class Window(W.QMainWindow):
         if not np.isfinite(intensity):
             self.clear_cursor_marker();return
         self.cursor_marker.setData([self.cursor_wave],[intensity]);self.cursor_marker.show()
-        self.cursor_label.setText(f'{self.cursor_wave:.2f} nm  ·  {intensity:.1f} counts')
+        self.cursor_label.setText(f'{self.cursor_wave:.1f} nm  ·  {intensity:.1f} counts')
     def mouse_moved(self,pos):
         if self.frame_data is None or not self.spectrum_view.sceneBoundingRect().contains(pos):
             self.clear_cursor_marker();return
@@ -479,7 +479,12 @@ class Window(W.QMainWindow):
         self.args.finished=True;self.stop_request.emit();self.reset_plot();self.mode.setCurrentIndex(2);self.smooth.setValue(2)
         path=Path(self.args.smoke);path.mkdir(parents=True,exist_ok=True)
         save_measurement(path/'measurement.npz',self.frame_data,self.corrected,self.displayed,self.peaks,self.settings(),self.applied_dark)
-        self.grab().save(str(path/'screenshot.png'));print(json.dumps(dict(device=self.frame_data['device'],peaks=[p.__dict__ for p in self.peaks],pixels=len(self.frame_data['wave'])),ensure_ascii=False),flush=True);self.close()
+        self.plot.viewport().repaint()
+        gpu_image=self.curve.capture_viewport(self.plot.viewport()) if isinstance(self.curve,GpuSpectrumCurve) else None
+        screenshot=self.grab()
+        if gpu_image is not None and not gpu_image.isNull():
+            painter=QtGui.QPainter(screenshot);painter.drawImage(self.plot.viewport().mapTo(self,QtCore.QPoint(0,0)),gpu_image);painter.end()
+        screenshot.save(str(path/'screenshot.png'));print(json.dumps(dict(device=self.frame_data['device'],peaks=[p.__dict__ for p in self.peaks],pixels=len(self.frame_data['wave'])),ensure_ascii=False),flush=True);self.close()
     def smoke_timeout(self):
         if not getattr(self.args,'finished',False):self.args.failed=True;print('Smoke timeout',file=sys.stderr);self.close()
     def closeEvent(self,event):
@@ -492,7 +497,7 @@ class Window(W.QMainWindow):
         event.accept()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--renderer',choices=['raster','opengl','cached-image'],default='raster',help='Experimental drawing backend');parser.add_argument('--demo',action='store_true');parser.add_argument('--connect',action='store_true',help='Connect on startup (now the default; does not start acquisition)');parser.add_argument('--smoke',help='Save screenshot and one measurement then exit');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--renderer',choices=['raster','opengl','cached-image'],default='opengl',help='Drawing backend (default: opengl; raster is the software fallback)');parser.add_argument('--demo',action='store_true');parser.add_argument('--connect',action='store_true',help='Connect on startup (now the default; does not start acquisition)');parser.add_argument('--smoke',help='Save screenshot and one measurement then exit');args=parser.parse_args()
     app=W.QApplication(sys.argv[:1]);app.setApplicationName('SpectraDesk')
     instance_lock=acquire_instance_lock()
     if instance_lock is None:

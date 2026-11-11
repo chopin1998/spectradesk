@@ -11,7 +11,7 @@ from PySide6 import QtCore,QtWidgets as W
 from spectradesk.app import Window
 from spectradesk.analysis import analyze,display_smooth
 app=W.QApplication([])
-win=Window(Namespace(demo=True,connect=False,smoke=None));win.show()
+win=Window(Namespace(demo=True,connect=False,smoke=None,renderer='raster'));win.show()
 errors=[]
 def verify():
     try:
@@ -29,7 +29,16 @@ def verify():
                 lo,hi=win.spectrum_view.viewRange()[1]
                 assert hi-lo>=200
                 assert lo<=float(win.displayed.min()) and hi>=float(win.displayed.max())
-                if parameter>=101:assert win.peaks
+                if parameter>=101:
+                    assert win.peaks
+                    peak=win.peaks[0]
+                    assert win.metric_labels[0].text()==f'{peak.wavelength:.1f}'
+                    assert win.table.item(0,0).text()==f'{peak.wavelength:.1f}'
+                    if peak.fwhm is not None:
+                        assert win.metric_labels[1].text()==f'{peak.fwhm:.1f}'
+                        assert win.table.item(0,2).text()==f'{peak.fwhm:.1f}'
+                    win.cursor_wave=peak.wavelength;win.update_cursor_marker()
+                    assert win.cursor_label.text().startswith(f'{peak.wavelength:.1f} nm')
             if parameter==102:assert hi>9000
     except BaseException as error:errors.append(error)
     finally:win.close();app.quit()

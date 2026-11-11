@@ -21,6 +21,8 @@ uv sync --locked
 ./run.sh --demo
 ```
 
+默认使用 OpenGL 绘图。显卡或驱动不兼容时，用 `./run.sh --renderer raster` 切回普通绘制。
+
 ## 怎么用
 
 - 插好光谱仪再启动，程序会自动连接，但不会自动采样。如果设备被虚拟机占用，先把 USB 设备释放出来。

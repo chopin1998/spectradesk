@@ -9,7 +9,7 @@ from argparse import Namespace
 from PySide6 import QtCore,QtGui,QtWidgets as W
 from spectradesk.app import Window
 app=W.QApplication([])
-win=Window(Namespace(demo=True,connect=False,smoke=None));win.show()
+win=Window(Namespace(demo=True,connect=False,smoke=None,renderer='raster'));win.show()
 errors=[];phase=0
 def poll():
     global phase

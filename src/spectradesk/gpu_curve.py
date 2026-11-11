@@ -11,6 +11,8 @@ from pyqtgraph.graphicsItems.PlotCurveItem import OpenGLState
 _native_gl=C.CDLL('libGL.so.1')
 _native_gl.glGetIntegerv.argtypes=[C.c_uint,C.POINTER(C.c_int)]
 _native_gl.glGetIntegerv.restype=None
+_native_gl.glReadPixels.argtypes=[C.c_int,C.c_int,C.c_int,C.c_int,C.c_uint,C.c_uint,C.c_void_p]
+_native_gl.glReadPixels.restype=None
 def framebuffer_binding():
     value=C.c_int();_native_gl.glGetIntegerv(0x8CA6,C.byref(value));return value.value
 
@@ -104,6 +106,21 @@ class GpuSpectrumCurve(pg.PlotCurveItem):
         super().__init__(**kwargs)
         self.curve=self # Same curve access as PlotDataItem for existing diagnostics.
         self.effect=0;self.serial=0;self.last_error=None
+    def capture_viewport(self,widget):
+        """Read the last painted Qt FBO without invoking grabFramebuffer's repaint."""
+        if self.glstate is None:return QtGui.QImage()
+        widget.makeCurrent();gl=widget.getFunctions();previous=framebuffer_binding()
+        try:
+            gl.glBindFramebuffer(GL_FRAMEBUFFER,self.glstate.output_fbo)
+            ratio=widget.devicePixelRatioF();w=round(widget.width()*ratio);h=round(widget.height()*ratio)
+            pixels=np.empty((h,w,4),dtype=np.uint8)
+            _native_gl.glReadPixels(0,0,w,h,0x1908,0x1401,pixels.ctypes.data)
+            pixels=pixels[::-1].copy()
+            image=QtGui.QImage(pixels.data,w,h,w*4,QtGui.QImage.Format.Format_RGBA8888).copy()
+            image.setDevicePixelRatio(ratio)
+            return image
+        finally:
+            gl.glBindFramebuffer(GL_FRAMEBUFFER,previous);widget.doneCurrent()
     def setData(self,*args,**kwargs):
         super().setData(*args,**kwargs)
         self.serial=getattr(self,'serial',0)+1

@@ -1,6 +1,6 @@
 # OpenGL 与荧光余辉实验
 
-分支：`experiment/gpu-rendering`。稳定基线：`836bb95`。默认仍为普通绘制。
+起源分支：`experiment/gpu-rendering`，现已并入主线。对照基线：`836bb95`。默认使用 OpenGL，普通绘制可通过 `--renderer raster` 选择。
 
 ## 运行
 

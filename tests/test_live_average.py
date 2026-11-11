@@ -23,7 +23,7 @@ class FakeDevice:
         return np.full((average,2048),30000,dtype=np.uint16)
     def close(self):pass
 module.Driver=FakeDevice
-app=W.QApplication([]);win=Window(Namespace(demo=False,connect=False,smoke=None));win.show()
+app=W.QApplication([]);win=Window(Namespace(demo=False,connect=False,smoke=None,renderer='raster'));win.show()
 phase=0;old_seen=False;errors=[]
 def poll():
     global phase,old_seen

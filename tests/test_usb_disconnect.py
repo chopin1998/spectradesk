@@ -86,7 +86,7 @@ class FakeDevice:
     def close(self):pass
 module.Driver=FakeDevice
 app=W.QApplication([])
-win=Window(Namespace(demo=False,connect=False,smoke=None));win.show()
+win=Window(Namespace(demo=False,connect=False,smoke=None,renderer='raster'));win.show()
 phase=0;errors=[]
 def poll():
     global phase

@@ -9,7 +9,7 @@ from spectradesk import gpu_curve
 from spectradesk.app import Window
 
 app=W.QApplication([])
-win=Window(Namespace(demo=True,connect=False,smoke=None,renderer='opengl'))
+win=Window(Namespace(demo=True,connect=False,smoke=None))
 win.show();QtTest.QTest.qWait(200)
 x=np.linspace(279,975,2048);y=np.full(2048,5000.)
 frame=dict(wave=x,mean=y,extra=np.zeros(2048),adc_frames=np.full((2,2048),30000,dtype=np.uint16),parameter=3000,average=2,demo=True,device=dict(serial='test'),index=1,elapsed=.04)
@@ -37,6 +37,9 @@ try:
         pixels=capture();images.append(pixels)
         assert np.count_nonzero(pixels[:,:,3])>100
         assert np.array_equal(win.curve.getData()[1],win.displayed)
+    win.plot.viewport().repaint()
+    visible=win.curve.capture_viewport(win.plot.viewport())
+    assert not visible.isNull()
     colored=images[1][images[1][:,:,3]>100][:,:3]
     assert len(np.unique(colored,axis=0))>32,'Rainbow shader produced a single color'
     stops=np.array([0,.15,.25,.375,.5,.625,.8,1.])
