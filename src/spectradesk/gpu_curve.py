@@ -56,6 +56,19 @@ out vec4 fragColor;
 void main(){fragColor=texture(u_texture,uv)*u_decay;}
 '''
 
+def shader_sources(context):
+    """Match GLSL syntax to the actual context, including Wayland/EGL ES."""
+    if not context.isOpenGLES() and context.format().version()>=(3,1):
+        return VERT,FRAG,QUAD_VERT,QUAD_FRAG
+    es=context.isOpenGLES()
+    version='#version 100' if es else '#version 120'
+    precision='\nprecision highp float;\nprecision highp int;' if es else ''
+    def vertex(source):
+        return source.replace('#version 140',version+precision).replace('in vec4 a_position','attribute vec4 a_position').replace('out float wavelength','varying float wavelength').replace('out vec2 uv','varying vec2 uv')
+    def fragment(source):
+        return source.replace('#version 140',version+precision).replace('in float wavelength','varying float wavelength').replace('in vec2 uv','varying vec2 uv').replace('out vec4 fragColor;','').replace('fragColor=','gl_FragColor=').replace('texture(u_texture,uv)','texture2D(u_texture,uv)')
+    return vertex(VERT),fragment(FRAG),vertex(QUAD_VERT),fragment(QUAD_FRAG)
+
 def compile_program(widget,key,vert,frag):
     program=widget.retrieveProgram(key)
     if program is None:
@@ -75,11 +88,13 @@ class SpectrumState(OpenGLState):
         self.quad_vbo=QtOpenGL.QOpenGLBuffer(QtOpenGL.QOpenGLBuffer.Type.VertexBuffer)
     def setup(self,context):
         if self.context is context:return
-        if self.context is not None:self.cleanup()
-        self.context=context;context.aboutToBeDestroyed.connect(self.cleanup)
+        if self.context is not None:
+            self.context.aboutToBeDestroyed.disconnect(self.cleanup)
+            self.cleanup()
         widget=self.parent()
-        program=compile_program(widget,'SpectraDeskSpectrum',VERT,FRAG)
-        compile_program(widget,'SpectraDeskTexture',QUAD_VERT,QUAD_FRAG)
+        vert,frag,quad_vert,quad_frag=shader_sources(context)
+        program=compile_program(widget,'SpectraDeskSpectrum',vert,frag)
+        compile_program(widget,'SpectraDeskTexture',quad_vert,quad_frag)
         self.m_vao.create();self.m_vbo.create();self.m_vao.bind();self.m_vbo.bind()
         program.enableAttributeArray(0);program.setAttributeBuffer(0,GL.GL_FLOAT,0,2)
         self.m_vbo.release();self.m_vao.release()
@@ -89,6 +104,7 @@ class SpectrumState(OpenGLState):
         quad=widget.retrieveProgram('SpectraDeskTexture')
         quad.enableAttributeArray(0);quad.setAttributeBuffer(0,GL.GL_FLOAT,0,2)
         self.quad_vbo.release();self.quad_vao.release()
+        self.context=context;context.aboutToBeDestroyed.connect(self.cleanup)
     def cleanup(self):
         widget=self.parent();widget.makeCurrent()
         self.targets=[];self.history_key=None;self.last_time=None;self.serial=-1

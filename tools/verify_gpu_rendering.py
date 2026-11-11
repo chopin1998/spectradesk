@@ -8,9 +8,14 @@ from PySide6 import QtCore,QtGui,QtOpenGL,QtTest,QtWidgets as W
 from spectradesk import gpu_curve
 from spectradesk.app import Window
 
+api=os.environ.get('SPECTRADESK_TEST_GL_API','desktop')
+if api=='es':
+    fmt=QtGui.QSurfaceFormat();fmt.setRenderableType(QtGui.QSurfaceFormat.RenderableType.OpenGLES);fmt.setVersion(3,0)
+    QtGui.QSurfaceFormat.setDefaultFormat(fmt)
 app=W.QApplication([])
 win=Window(Namespace(demo=True,connect=False,smoke=None))
 win.show();QtTest.QTest.qWait(200)
+assert win.plot.viewport().context().isOpenGLES()==(api=='es'),'Requested GL API was not created'
 x=np.linspace(279,975,2048);y=np.full(2048,5000.)
 frame=dict(wave=x,mean=y,extra=np.zeros(2048),adc_frames=np.full((2,2048),30000,dtype=np.uint16),parameter=3000,average=2,demo=True,device=dict(serial='test'),index=1,elapsed=.04)
 clock=[0.];gpu_curve.time=SimpleNamespace(monotonic=lambda:clock[0])
