@@ -16,7 +16,9 @@ from .camera import CameraProfile,display_camera_profile
 
 class Workbench(W.QMainWindow):
     def __init__(self,args):
-        super().__init__();self.peak_offset=0.;self._syncing_parallel=False;self.renderer=getattr(args,'renderer','opengl')
+        super().__init__();self._closing=False;self.peak_offset=0.;self._syncing_parallel=False;self.renderer=getattr(args,'renderer','opengl')
+        self._last_sampling_state=();self._pending_starts=set();self._tab_state_key=None;self._tab_icons={}
+        self._navigation_timer=QtCore.QTimer(self);self._navigation_timer.setSingleShot(True);self._navigation_timer.setInterval(100);self._navigation_timer.timeout.connect(self.navigate_sampling_tab)
         self.setWindowTitle('SpectraDesk · 双设备光谱工作台')
         self.resize(1560,1040)
         root=W.QWidget();layout=W.QHBoxLayout(root);layout.setContentsMargins(12,10,12,10);self.setCentralWidget(root)
@@ -59,6 +61,7 @@ class Workbench(W.QMainWindow):
             options=Namespace(**vars(args));options.backend=backend;options.smoke=None
             session=Window(options);session.setParent(self.tabs);session.setWindowFlags(QtCore.Qt.WindowType.Widget)
             self.sessions.append(session);self.tabs.addTab(session,title)
+            session.worker.state.connect(lambda text,i=len(self.sessions)-1:self.device_tab_event(i,text))
             body=session.centralWidget().layout().itemAt(1).layout()
             scroll=body.itemAt(0).widget();body.removeWidget(scroll)
             controls=scroll.takeWidget();controls.setMinimumWidth(0);controls.setMaximumWidth(16777215)
@@ -145,6 +148,49 @@ class Workbench(W.QMainWindow):
         buttons.button(W.QDialogButtonBox.StandardButton.Apply).clicked.connect(lambda:(self.set_peak_offset(boxes[0].currentData()-boxes[1].currentData()),dialog.accept()))
         buttons.button(W.QDialogButtonBox.StandardButton.Reset).clicked.connect(lambda:(self.set_peak_offset(0),dialog.accept()))
         buttons.rejected.connect(dialog.reject);layout.addRow(buttons);dialog.exec()
+
+    def device_tab_event(self,index,text):
+        if self._closing:return
+        if text in ('连续采集中','单次采集中') or text=='自动积分 · 正在寻找合适强度':
+            self._pending_starts.add(index)
+            if not self._navigation_timer.isActive():self._navigation_timer.start()
+        self.update_tab_states()
+
+    def navigate_sampling_tab(self):
+        if self._closing:return
+        active=[i for i,s in enumerate(self.sessions) if s.ready and s.busy]
+        starts=self._pending_starts;self._pending_starts=set()
+        target=active[0] if len(active)==1 else (next(iter(starts)) if not active and len(starts)==1 else None)
+        if target is not None:self.tabs.setCurrentIndex(target)
+
+    def update_tab_states(self):
+        if self._closing:return
+        if not hasattr(self,'sessions') or self.tabs.count()<4:return
+        active=tuple(i for i,s in enumerate(self.sessions) if s.ready and s.busy)
+        if active!=self._last_sampling_state:
+            self._last_sampling_state=active
+            if len(active)==1 and not self._navigation_timer.isActive():self._navigation_timer.start()
+        mode=self.sessions[0].theme.currentText()
+        dark=mode=='暗色' or (mode=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark)
+        colors=('#77d6a4','#88bff4','#e9c088','#96a1ad','#f08e83') if dark else ('#26724b','#285c8c','#9c6517','#74808b','#b03a32')
+        states=[]
+        for session in self.sessions:
+            if session.connecting:state=('连接中',2)
+            elif session.ready:state=('采集中',0) if session.busy else ('可用',1)
+            elif '异常' in session.device_status.text():state=('异常',4)
+            elif session.device_present:state=('待连接',2)
+            else:state=('未找到设备',3)
+            states.append(state)
+        comparison=('双设备采集中',0) if len(active)==2 else (('单设备采集中',2) if active else (('可对比',1) if all(s.frame_data is not None for s in self.sessions) else ('等待测量数据',3)))
+        states.extend([comparison,comparison]);key=(dark,tuple(states))
+        if self._tab_state_key==key:return
+        self._tab_state_key=key;bar=self.tabs.tabBar()
+        for index,(label,color_index) in enumerate(states):
+            color=colors[color_index]
+            if color not in self._tab_icons:
+                pixmap=QtGui.QPixmap(12,12);pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+                painter=QtGui.QPainter(pixmap);painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing);painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(color));painter.drawEllipse(1,1,10,10);painter.end();self._tab_icons[color]=QtGui.QIcon(pixmap)
+            bar.setTabTextColor(index,QtGui.QColor(color));bar.setTabIcon(index,self._tab_icons[color]);bar.setTabToolTip(index,self.tabs.tabText(index)+'：'+label)
 
     def compact_controls(self,session):
         session.compact_sidebar=True
@@ -267,10 +313,12 @@ class Workbench(W.QMainWindow):
         except Exception as error:W.QMessageBox.warning(self,'保存失败',str(error))
 
     def select_view(self,index):
+        if self._closing:return
         self.align_button.setVisible(index in (2,3))
         self.refresh()
 
     def update_device_styles(self):
+        if self._closing:return
         mode=self.sessions[0].theme.currentText()
         dark=mode=='暗色' or (mode=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark)
         palettes=(('#202f40','#629ed3','#a8d1f5'),('#372e25','#c99b61','#eed1a7')) if dark else (('#edf4fb','#5c8fb7','#254e73'),('#fbf3e8','#b78b52','#775122'))
@@ -292,6 +340,7 @@ class Workbench(W.QMainWindow):
             with QtCore.QSignalBlocker(session.theme):session.theme.setCurrentIndex(index)
             session.change_theme()
         self.update_device_styles()
+        self.update_tab_states()
         self.plot.setBackground(self.sessions[0].plot.backgroundBrush().color())
         for plot in self.parallel_plots:plot.setBackground(self.sessions[0].plot.backgroundBrush().color())
         for axis in ('left','right','bottom'):
@@ -359,6 +408,7 @@ class Workbench(W.QMainWindow):
         else:self.fit_stable_y(self.plot.getViewBox(),self.curves,1.,'normalized')
 
     def refresh(self,*_):
+        if self._closing:return
         if self.sessions[1].frame_data is not None:
             camera=self.sessions[1];meta=camera.frame_data.get('device',{})
             context=(repr(meta.get('camera_profile',{})),camera.calibration_enabled.isChecked(),camera.nonlinearity_enabled.isChecked())
@@ -403,6 +453,7 @@ class Workbench(W.QMainWindow):
         self.fit_comparison_axes()
         self.align_overlay_zero()
         self.update_device_styles()
+        self.update_tab_states()
         for session,(label,button,config,dark) in zip(self.sessions,self.device_cards):
             label.setText(session.device_status.text())
             button.setText('断开设备' if session.ready else '连接设备')
@@ -441,7 +492,9 @@ class Workbench(W.QMainWindow):
         for s in self.sessions:s.stop_request.emit()
 
     def closeEvent(self,event):
-        self.timer.stop()
+        if self._closing:event.accept();return
+        self._closing=True
+        self.timer.stop();self._navigation_timer.stop()
         for session in self.sessions:session.close()
         store=QtCore.QSettings('SpectraDesk','SpectraDesk');store.setValue('workbench/geometry',self.saveGeometry());store.setValue('workbench/vertical-splitter',self.parallel.sizes());store.sync()
         event.accept()

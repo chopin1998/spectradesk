@@ -20,12 +20,12 @@ win=Workbench(Namespace(demo=True,smoke=None,renderer='raster'));win.show();erro
 def check():
  try:
   session=win.sessions[1];win.tabs.setCurrentIndex(1);session.camera_exposure_auto.setChecked(False)
-  session.camera_exposure.setFocus();editor=session.camera_exposure.lineEdit();editor.selectAll();QtTest.QTest.keyClicks(editor,'45.6')
+  session.camera_exposure.setFocus();editor=session.camera_exposure.lineEdit();editor.selectAll();QtTest.QTest.keyClicks(editor,'25.6')
   before=editor.text();cursor=editor.cursorPosition()
   for _ in range(25):session.set_controls(True)
   assert editor.text()==before and editor.cursorPosition()==cursor,(editor.text(),before)
   QtTest.QTest.keyClick(editor,QtCore.Qt.Key.Key_Return)
-  assert session.integration.value()==456
+  assert session.integration.value()==256
   assert session.camera_exposure.isEnabled()
  except BaseException as error:errors.append(error)
  finally:win.close();app.quit()

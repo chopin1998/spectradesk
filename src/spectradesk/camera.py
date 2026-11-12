@@ -119,7 +119,7 @@ def wavelength_aligned_strip(rgb,wavelengths):
     return result,float(uniform[0]-step/2),float(step*len(uniform))
 
 class CameraDriver:
-    def __init__(self,path,profile):self.path=path;self.profile=profile;self.cap=None;self.parameter=None;self.exposure_auto=True;self.exposure_value=78;self.exposure_used=78;self._exposure_changed=False
+    def __init__(self,path,profile):self.path=path;self.profile=profile;self.cap=None;self.parameter=None;self.exposure_auto=True;self.exposure_value=78;self.exposure_used=78;self._exposure_changed=False;self.exposure_max=10000
     def open(self):
         import cv2
         self.cv2=cv2
@@ -133,8 +133,11 @@ class CameraDriver:
         ok,image=self.cap.read()
         if not ok:self.close();raise RuntimeError('相机启动取流失败')
         self.image=image.copy()
+        reported_fps=float(self.cap.get(cv2.CAP_PROP_FPS))
+        self.stream_fps=reported_fps if np.isfinite(reported_fps) and reported_fps>0 else self.profile.fps
+        self.exposure_max=max(78,min(10000,int(10000/self.stream_fps)))
         self.wave,self.extra=self.profile.wavelengths()
-        self.meta=dict(model='Camera · Theremino',serial=self.path,firmware='V4L2 / MJPG',backend='camera',camera_profile=asdict(self.profile))
+        self.meta=dict(model='Camera · Theremino',serial=self.path,firmware='V4L2 / MJPG',backend='camera',camera_profile=asdict(self.profile),camera_fps=self.stream_fps,camera_exposure_max=self.exposure_max)
         return self.meta,self.wave,self.extra
     def capture(self,average):
         frames=[];self.saturated=False
@@ -152,15 +155,15 @@ class CameraDriver:
             oriented=image[:,::-1] if self.profile.flip else image
             x,y,w,h=self.profile.roi();brightest=max(brightest,int(oriented[y:y+h,x:x+w].max()))
         if self.exposure_auto:
-            next_value=self.auto_exposure_value(self.exposure_used,brightest)
+            next_value=self.auto_exposure_value(self.exposure_used,brightest,self.exposure_max)
             if next_value!=self.exposure_value:self._write_exposure(next_value)
         return np.asarray(frames)
     @staticmethod
-    def auto_exposure_value(current,brightest):
-        if 170<=brightest<=220:return current
+    def auto_exposure_value(current,brightest,maximum=10000):
+        if 170<=brightest<=220:return max(78,min(maximum,current))
         ratio=float(np.clip(195/max(brightest,1),.5,2.))
         if brightest>=250:ratio=.5
-        return int(np.clip(round(current*ratio),78,10000))
+        return int(np.clip(round(current*ratio),78,maximum))
     def set_exposure_auto(self,enabled):
         self.exposure_auto=bool(enabled)
         if self.cap is None:return
@@ -174,7 +177,7 @@ class CameraDriver:
         if self.cap is None or self.exposure_auto:return
         self._write_exposure(self.parameter)
     def _write_exposure(self,value):
-        if not 78<=value<=10000:raise ValueError('曝光时间必须在 7.8–1000 ms')
+        if not 78<=value<=self.exposure_max:raise ValueError(f'当前帧率下曝光设定范围为 7.8–{self.exposure_max/10:.1f} ms')
         if not self.cap.set(self.cv2.CAP_PROP_EXPOSURE,value):raise RuntimeError('相机不支持手动曝光设置')
         actual=int(round(self.cap.get(self.cv2.CAP_PROP_EXPOSURE)))
         if abs(actual-value)>1:raise RuntimeError(f'相机曝光时间设置未生效：请求 {value}，实际 {actual}')

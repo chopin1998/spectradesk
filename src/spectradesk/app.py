@@ -283,8 +283,11 @@ class Window(W.QMainWindow):
         self.camera_dark.setVisible(camera);self.camera_dark.setEnabled(ready and self.frame_data is not None);self.camera_button.setVisible(camera);self.camera_button.setEnabled(not ready and not self.connecting)
         self.raw_preview_toggle.setVisible(camera);self.raw_preview.setVisible(camera and self.raw_preview_toggle.isChecked())
         self.camera_exposure_auto.setVisible(camera);self.camera_exposure_status.setVisible(camera)
-        minimum,maximum=(78,10000) if camera else (15,65535)
+        maximum=getattr(self,'connection',{}).get('meta',{}).get('camera_exposure_max',max(78,int(10000/self.camera_profile.fps))) if camera else 65535
+        minimum=78 if camera else 15
         if (self.integration.minimum(),self.integration.maximum())!=(minimum,maximum):self.integration.setRange(minimum,maximum)
+        if camera and self.camera_exposure.maximum()!=maximum/10:self.camera_exposure.setMaximum(maximum/10)
+        self.camera_exposure.setToolTip('当前帧率下曝光上限受帧间隔限制；相机可能以离散档位响应，输入步进不等于实际曝光精度。')
         self.update_integration_label(self.integration.value())
         self.integration.setVisible(not camera);self.camera_exposure.setVisible(camera and not self.camera_exposure_auto.isChecked());self.integration_label.setVisible(not camera or not self.camera_exposure_auto.isChecked());self.auto_button.setVisible(not camera)
         self.integration.setEnabled(not getattr(self,'auto_busy',False))
@@ -403,7 +406,7 @@ class Window(W.QMainWindow):
         self.frame_data=frame;self.save_button.setEnabled(True)
         if frame.get('backend')=='camera' and 'camera_exposure_ms' in frame:
             ms=frame['camera_exposure_ms'];auto=frame.get('camera_exposure_mode')=='spectrum-auto'
-            limit=' · 已到最短' if ms<=7.8 else (' · 已到最长' if ms>=1000 else '')
+            limit=' · 已到最短' if ms<=7.8 else (' · 已到最长' if ms>=frame.get('device',{}).get('camera_exposure_max',10000)/10 else '')
             self.camera_exposure_status.setText(f"{'自动' if auto else '手动'} · 设定 {ms:.1f} ms"+limit+f" · 峰值 {float(np.max(frame['mean'])):.1f} DN")
         if self.raw_preview_toggle.isChecked():self.update_raw_preview()
         now=time.monotonic() if self.capture_started_at is None else self.capture_started_at+frame['elapsed']

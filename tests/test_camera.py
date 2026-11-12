@@ -175,3 +175,8 @@ def test_wavelength_calibration_comparison_modes():
     np.testing.assert_array_equal(before,original)
     assert not np.allclose(linear,calibrated)
     np.testing.assert_array_equal(p.wavelengths()[0],calibrated)
+
+
+def test_auto_exposure_respects_frame_interval_cap():
+    from spectradesk.camera import CameraDriver
+    assert CameraDriver.auto_exposure_value(300,30,333)==333
