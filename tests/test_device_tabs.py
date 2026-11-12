@@ -43,3 +43,39 @@ finally:w.close()
 '''
     result=subprocess.run([sys.executable,'-c',code],env=dict(os.environ,QT_QPA_PLATFORM='offscreen',XDG_CONFIG_HOME=str(tmp_path)),capture_output=True,text=True,timeout=20)
     assert result.returncode==0,result.stdout+result.stderr
+
+
+def test_acquisition_status_updates_stay_on_gui_thread(tmp_path):
+    code='''
+from argparse import Namespace
+from PySide6 import QtCore,QtWidgets as W,QtTest
+from spectradesk.workbench import Workbench
+app=W.QApplication([]);messages=[];threads=[]
+QtCore.qInstallMessageHandler(lambda kind,context,text:messages.append(text))
+class CheckedWorkbench(Workbench):
+ def device_tab_event(self,index,text):
+  threads.append(QtCore.QThread.currentThread()==app.thread())
+  super().device_tab_event(index,text)
+w=CheckedWorkbench(Namespace(demo=True,smoke=None,renderer='raster'));w.show()
+try:
+ for _ in range(100):
+  if all(s.ready for s in w.sessions):break
+  QtTest.QTest.qWait(20)
+ assert all(s.ready for s in w.sessions)
+ for i,s in enumerate(w.sessions):s.average.setValue(1);s.integration.setValue(78 if i else 15)
+ w.start_all()
+ for _ in range(150):
+  if all(s.frame_data is not None for s in w.sessions):break
+  QtTest.QTest.qWait(20)
+ assert all(s.frame_data is not None for s in w.sessions)
+ for s in w.sessions:s.stop_request.emit()
+ QtTest.QTest.qWait(150)
+ w.sessions[0].start(False);QtTest.QTest.qWait(300)
+ assert w.tabs.currentIndex()==0
+finally:w.close()
+assert threads and all(threads),threads
+assert not any('another thread' in message for message in messages),messages
+assert not any(s.thread.isRunning() for s in w.sessions)
+'''
+    result=subprocess.run([sys.executable,'-c',code],env=dict(os.environ,QT_QPA_PLATFORM='offscreen',XDG_CONFIG_HOME=str(tmp_path)),capture_output=True,text=True,timeout=20)
+    assert result.returncode==0,result.stdout+result.stderr

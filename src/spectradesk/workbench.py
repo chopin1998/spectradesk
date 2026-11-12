@@ -62,7 +62,7 @@ class Workbench(W.QMainWindow):
             options=Namespace(**vars(args));options.backend=backend;options.smoke=None
             session=Window(options);session.setParent(self.tabs);session.setWindowFlags(QtCore.Qt.WindowType.Widget)
             self.sessions.append(session);self.tabs.addTab(session,title)
-            session.worker.state.connect(lambda text,i=len(self.sessions)-1:self.device_tab_event(i,text))
+            session.worker.state.connect(self.device_state_changed,QtCore.Qt.ConnectionType.QueuedConnection)
             body=session.centralWidget().layout().itemAt(1).layout()
             scroll=body.itemAt(0).widget();body.removeWidget(scroll)
             controls=scroll.takeWidget();controls.setMinimumWidth(0);controls.setMaximumWidth(16777215)
@@ -148,6 +148,15 @@ class Workbench(W.QMainWindow):
         buttons.button(W.QDialogButtonBox.StandardButton.Apply).clicked.connect(lambda:(self.set_peak_offset(boxes[0].currentData()-boxes[1].currentData()),dialog.accept()))
         buttons.button(W.QDialogButtonBox.StandardButton.Reset).clicked.connect(lambda:(self.set_peak_offset(0),dialog.accept()))
         buttons.rejected.connect(dialog.reject);layout.addRow(buttons);dialog.exec()
+
+    @QtCore.Slot(str)
+    def device_state_changed(self,text):
+        if self._closing:return
+        source=self.sender()
+        for index,session in enumerate(self.sessions):
+            if session.worker is source:
+                self.device_tab_event(index,text)
+                return
 
     def device_tab_event(self,index,text):
         if self._closing:return
