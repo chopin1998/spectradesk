@@ -43,7 +43,6 @@ QCheckBox {spacing:8px;} QCheckBox::indicator {width:18px;height:18px;}
 QTableWidget {background:#fafaf9;alternate-background-color:#f0f3f6;border:0;gridline-color:#dce1e6;selection-background-color:#dce7f2;selection-color:#213a59;}
 QHeaderView::section {background:#eaf0f5;color:#40566d;border:0;padding:7px;font-size:10pt;}
 QStatusBar {background:#eeeef0;color:#526477;border-top:1px solid #d4d9df;}
-QToolTip {background:#fffdf6;color:#263349;border:1px solid #bcc8d3;}
 QScrollArea {border:0;background:#eeeef0;}
 QScrollBar:vertical {background:#eeeef0;width:10px;border:0;}
 QScrollBar::handle:vertical {background:#b0beca;border-radius:4px;min-height:30px;}
@@ -74,8 +73,7 @@ def apply_theme(app,mode="跟随系统"):
         'Base':('#ffffff','#18212c'),'AlternateBase':('#f0f3f6','#273341'),
         'Text':('#263349','#dce4ed'),'Button':('#f8f9fb','#2a3543'),
         'ButtonText':('#263349','#dce4ed'),'Highlight':('#345d85','#344d67'),
-        'HighlightedText':('#ffffff','#ffffff'),'ToolTipBase':('#fffdf6','#212934'),
-        'ToolTipText':('#263349','#dce4ed'),'PlaceholderText':('#586777','#a2b1c2'),
+        'HighlightedText':('#ffffff','#ffffff'),'PlaceholderText':('#586777','#a2b1c2'),
         'Light':('#ffffff','#536377'),'Midlight':('#eaf0f5','#3b4654'),
         'Mid':('#bcc8d3','#3b4654'),'Dark':('#8a949f','#10151b'),
         'Shadow':('#586777','#0c1015'),'Link':('#245b8f','#84b9ed'),
@@ -96,7 +94,7 @@ class ThemeSelector(W.QPushButton):
     modes=('跟随系统','浅色','暗色')
     def __init__(self,parent=None):
         super().__init__(parent);self.index=0
-        self.setText('主题：跟随系统');self.setToolTip('点击切换：跟随系统 → 浅色 → 暗色')
+        self.setText('主题：跟随系统')
         self.clicked.connect(lambda:self.setCurrentIndex((self.index+1)%len(self.modes)))
     def currentIndex(self):return self.index
     def currentText(self):return self.modes[self.index]
@@ -192,16 +190,15 @@ class Window(W.QMainWindow):
         self.integration_label=self.label('积分时间 · 250');l.addWidget(self.integration_label)
         self.integration=DigitSpinBox();self.integration.setRange(15,65535);self.integration.setValue(250);self.integration.setKeyboardTracking(False);self.integration.valueChanged.connect(self.integration_request.emit);self.integration.valueChanged.connect(self.update_integration_label);l.addWidget(self.integration)
         self.camera_exposure=DigitDoubleSpinBox();self.camera_exposure.setRange(7.8,1000.0);self.camera_exposure.setDecimals(1);self.camera_exposure.setSingleStep(.1);self.camera_exposure.setSuffix(' ms');self.camera_exposure.setValue(self.integration.value()/10);self.camera_exposure.setKeyboardTracking(False)
-        self.camera_exposure.setToolTip('相机曝光时间，以毫秒显示；驱动原始值每单位为 0.1 ms。')
         self.camera_exposure.valueChanged.connect(lambda value:self.integration.setValue(round(value*10)));l.addWidget(self.camera_exposure)
         self.camera_exposure_status=W.QLabel('实际曝光：待采集');self.camera_exposure_status.setWordWrap(True);l.addWidget(self.camera_exposure_status)
-        self.camera_exposure_auto=W.QCheckBox('光谱自动曝光');self.camera_exposure_auto.setToolTip('按光谱取样条带自动调节曝光；最短7.8 ms，达到最短仍饱和时需减弱入光。');self.camera_exposure_auto.setChecked(True);self.camera_exposure_auto.toggled.connect(self.exposure_auto_request.emit);self.camera_exposure_auto.toggled.connect(self.set_controls_for_exposure);self.camera_exposure_auto.toggled.connect(self.clear_camera_dark_for_exposure);self.integration.valueChanged.connect(self.clear_camera_dark_for_exposure);l.addWidget(self.camera_exposure_auto)
+        self.camera_exposure_auto=W.QCheckBox('光谱自动曝光');self.camera_exposure_auto.setChecked(True);self.camera_exposure_auto.toggled.connect(self.exposure_auto_request.emit);self.camera_exposure_auto.toggled.connect(self.set_controls_for_exposure);self.camera_exposure_auto.toggled.connect(self.clear_camera_dark_for_exposure);self.integration.valueChanged.connect(self.clear_camera_dark_for_exposure);l.addWidget(self.camera_exposure_auto)
         self.auto_button=W.QPushButton('自动选择积分');self.auto_button.clicked.connect(self.request_auto);l.addWidget(self.auto_button)
-        row=W.QHBoxLayout();row.addWidget(self.label('平均帧数'));self.average=W.QSpinBox();self.average.setRange(1,8);self.average.setValue(2);self.average.setKeyboardTracking(False);self.average.valueChanged.connect(self.average_request.emit);self.average.setToolTip('实际采集帧数，范围 1–8。自动积分后：低于 1 Hz 改为 1 帧，高于约 20 Hz 适当增加。STA 的“平均1”读取两帧，对照时这里选2。');row.addWidget(self.average);l.addLayout(row)
+        row=W.QHBoxLayout();row.addWidget(self.label('平均帧数'));self.average=W.QSpinBox();self.average.setRange(1,8);self.average.setValue(2);self.average.setKeyboardTracking(False);self.average.valueChanged.connect(self.average_request.emit);row.addWidget(self.average);l.addLayout(row)
         row=W.QHBoxLayout();self.single=W.QPushButton('单次');self.single.clicked.connect(lambda:self.start(False));self.run=W.QPushButton('连续采集');self.run.setObjectName('primary');self.run.clicked.connect(self.toggle_acquisition);row.addWidget(self.single);row.addWidget(self.run);l.addLayout(row)
         side.addWidget(panel)
         panel,l=self.card();l.addWidget(self.label('显示','section'));self.mode=W.QComboBox();self.mode.addItems(['专业单色线','连续彩虹线','彩虹填充谱','荧光余辉']);self.mode.currentIndexChanged.connect(self.render);l.addWidget(self.mode)
-        row=W.QHBoxLayout();row.addWidget(self.label('平滑'));self.smooth=W.QSpinBox();self.smooth.setRange(0,8);self.smooth.setSpecialValueText('关闭');self.smooth.setValue(1);self.smooth.setToolTip('N 对应 2N 个点，仅影响显示与STA对照导出；分析使用未平滑校正数据。设备校正模式复现STA尾部不平滑规则。');self.smooth.valueChanged.connect(self.render);row.addWidget(self.smooth);l.addLayout(row)
+        row=W.QHBoxLayout();row.addWidget(self.label('平滑'));self.smooth=W.QSpinBox();self.smooth.setRange(0,8);self.smooth.setSpecialValueText('关闭');self.smooth.setValue(1);self.smooth.valueChanged.connect(self.render);row.addWidget(self.smooth);l.addLayout(row)
         self.overlay=W.QCheckBox('叠加未平滑曲线');self.overlay.setChecked(True);self.overlay.toggled.connect(self.render);l.addWidget(self.overlay)
         l.addWidget(self.label('显示波长范围 / nm'))
         row=W.QHBoxLayout();self.display_start=DigitDoubleSpinBox();self.display_end=DigitDoubleSpinBox()
@@ -287,7 +284,6 @@ class Window(W.QMainWindow):
         minimum=78 if camera else 15
         if (self.integration.minimum(),self.integration.maximum())!=(minimum,maximum):self.integration.setRange(minimum,maximum)
         if camera and self.camera_exposure.maximum()!=maximum/10:self.camera_exposure.setMaximum(maximum/10)
-        self.camera_exposure.setToolTip('当前帧率下曝光上限受帧间隔限制；相机可能以离散档位响应，输入步进不等于实际曝光精度。')
         self.update_integration_label(self.integration.value())
         self.integration.setVisible(not camera);self.camera_exposure.setVisible(camera and not self.camera_exposure_auto.isChecked());self.integration_label.setVisible(not camera or not self.camera_exposure_auto.isChecked());self.auto_button.setVisible(not camera)
         self.integration.setEnabled(not getattr(self,'auto_busy',False))
@@ -339,7 +335,8 @@ class Window(W.QMainWindow):
     @QtCore.Slot(object)
     def on_connected(self,data):
         if self._closing:return
-        self.connection=data;self.device_label.setText(data['meta']['model']);self.serial_label.setText(f"{data['meta']['serial']}\n{data['meta']['firmware']}");self.serial_label.setToolTip(data['meta']['serial']);self.set_controls(True)
+        if data['meta'].get('backend')=='camera' and not data['demo']:self.camera_path=data['meta']['serial']
+        self.connection=data;self.device_label.setText(data['meta']['model']);self.serial_label.setText(f"{data['meta']['serial']}\n{data['meta']['firmware']}");self.set_controls(True)
         self.device_status.setText('模拟数据 · 非实测' if data['demo'] else 'USB 已连接')
         self.profile=None;self.calibration_error=None;self.initial_fit_done=False
         self.frame_data=None;self.dark=None;self.save_button.setEnabled(False)
@@ -359,6 +356,7 @@ class Window(W.QMainWindow):
     @QtCore.Slot(str)
     def on_state(self,text):
         if self._closing:return
+        if text=='正在连接…':self.connecting=True;self.device_status.setText(text)
         self.auto_busy=text.startswith('自动积分 ·');self.busy=text in ('连续采集中','单次采集中') or self.auto_busy
         if not self.auto_busy:self.continuous=text=='连续采集中'
         self.set_controls(self.ready);self.status.showMessage(text)
@@ -431,7 +429,6 @@ class Window(W.QMainWindow):
         aligned,left,span=wavelength_aligned_strip(rgb,f['wave'])
         self.raw_band.setImage(aligned,autoLevels=False)
         self.raw_band.setRect(QtCore.QRectF(left,0,span,h))
-        self.raw_band_plot.setToolTip('光带按当前波长标定横向映射，与下方谱峰同轴；仅显示插值，不改变原始数据')
         self.align_raw_band()
         self.pixel_curve.setData(np.arange(x,x+len(f['mean'])),f['mean'])
     def align_raw_band(self,*_):
@@ -504,7 +501,6 @@ class Window(W.QMainWindow):
             for row,p in enumerate(self.peaks):
                 p.area=integrate_peak(x,y,p,self.range_start.value(),self.range_end.value())
                 area=p.area
-                quality='；'.join(filter(None,[p.warning,area.warning if area else ''])) or '可分析'
                 texts=[f'{p.wavelength:.1f}',f'{p.intensity:.1f}','—' if p.fwhm is None else f'{p.fwhm:.1f}',
                        '—' if area is None or area.start is None else f'{area.start:.1f}',
                        '—' if area is None or area.end is None else f'{area.end:.1f}',
@@ -513,7 +509,6 @@ class Window(W.QMainWindow):
                     item=self.table.item(row,col)
                     if item is None:item=W.QTableWidgetItem();self.table.setItem(row,col,item)
                     item.setText(text);item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                    item.setToolTip('；'.join(filter(None,[text,quality if quality!='可分析' else '', '自动确定起止点；局部背景扣除后，对未平滑校正数据积分。' if col>=3 else ''])))
                 if area is not None:
                     if area.start is not None:starts.append(area.start)
                     if area.end is not None:ends.append(area.end)
@@ -675,9 +670,16 @@ class Window(W.QMainWindow):
             self.thread.quit();self.thread.wait(5000)
         event.accept()
 
+class ToolTipFilter(QtCore.QObject):
+    def eventFilter(self,watched,event):
+        if event.type()==QtCore.QEvent.Type.ToolTip:return True
+        return super().eventFilter(watched,event)
+
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--renderer',choices=['raster','opengl','cached-image'],default='opengl',help='Drawing backend (default: opengl; raster is the software fallback)');parser.add_argument('--demo',action='store_true');parser.add_argument('--connect',action='store_true',help='Connect on startup (now the default; does not start acquisition)');parser.add_argument('--smoke',help='Save screenshot and one measurement then exit');args=parser.parse_args()
     app=W.QApplication(sys.argv[:1]);app.setApplicationName('SpectraDesk')
+    tooltip_filter=ToolTipFilter(app);app.installEventFilter(tooltip_filter)
     instance_lock=acquire_instance_lock()
     if instance_lock is None:
         print('SpectraDesk 已在运行，或无法取得运行锁。',file=sys.stderr);return 1

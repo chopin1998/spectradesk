@@ -27,9 +27,10 @@ class Workbench(W.QMainWindow):
         self.sidepanel.setFixedWidth(400);layout.addWidget(self.sidepanel)
         side_root=W.QWidget();self.side=W.QVBoxLayout(side_root);self.side.setContentsMargins(4,4,4,4);self.side.setSpacing(24)
         self.sidepanel.setWidget(side_root)
+        self.no_devices=W.QLabel('未检测到光谱仪\n请连接设备');self.no_devices.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter);self.no_devices.setWordWrap(True);self.no_devices.setMinimumHeight(180);self.side.addWidget(self.no_devices,1)
         self.device_cards=[];self.device_control_layouts=[];self.device_controls=[];self.device_panels=[]
         for index,title in enumerate(('FLIGHT FLA5000','Camera / Theremino')):
-            card=W.QFrame();card.setObjectName(f'devicePanel{index}');self.device_panels.append(card);box=W.QVBoxLayout(card);box.setContentsMargins(12,10,12,10);box.setSpacing(7)
+            card=W.QFrame();card.hide();card.setObjectName(f'devicePanel{index}');self.device_panels.append(card);box=W.QVBoxLayout(card);box.setContentsMargins(12,10,12,10);box.setSpacing(7)
             heading=W.QHBoxLayout();name=W.QLabel(title);name.setObjectName('deviceHeading');name.setWordWrap(True);heading.addWidget(name,1);box.addLayout(heading)
             status=W.QLabel('正在查找设备…');status.setWordWrap(True);box.addWidget(status)
             connect=W.QPushButton('连接设备');connect.clicked.connect(lambda _,i=index:self.sessions[i].toggle_connection());heading.addWidget(connect)
@@ -39,7 +40,7 @@ class Workbench(W.QMainWindow):
             else:config=dark=None
             self.device_control_layouts.append(box)
             self.side.addWidget(card);self.device_cards.append((status,connect,config,dark))
-        self.tabs=W.QTabWidget();layout.addWidget(self.tabs,1)
+        self.tabs=W.QTabWidget();self.content=W.QStackedWidget();self.content.addWidget(self.tabs);self.content.addWidget(W.QWidget());layout.addWidget(self.content,1)
         actions=W.QWidget();actions_layout=W.QHBoxLayout(actions);actions_layout.setContentsMargins(0,0,0,0)
         calibration=W.QPushButton('设备校准');calibration.clicked.connect(self.calibration_dialog);actions_layout.addWidget(calibration)
         self.save_all_button=W.QPushButton('保存测量…');self.save_all_button.clicked.connect(self.save_measurements);actions_layout.addWidget(self.save_all_button)
@@ -86,7 +87,7 @@ class Workbench(W.QMainWindow):
         for title in ('FLA5000','摄像头'):
             check=W.QCheckBox(title);check.setChecked(True);row.addWidget(check);self.visible.append(check)
         reset=W.QPushButton('完整波段');reset.clicked.connect(self.reset_comparison);row.addWidget(reset);row.addStretch()
-        self.align_bottom=W.QCheckBox('底部对齐');self.align_bottom.setToolTip('仅叠加显示：把各曲线当前波段的最低值移到0，并对齐两轴零点；不修改测量和保存数据');self.align_bottom.toggled.connect(self.bottom_alignment_changed);row.addWidget(self.align_bottom)
+        self.align_bottom=W.QCheckBox('底部对齐');self.align_bottom.toggled.connect(self.bottom_alignment_changed);row.addWidget(self.align_bottom)
         self.plot=SpectrumPlot(renderer=self.renderer);comparison.addWidget(self.plot,1)
         self.plot.setLabel('bottom','波长',units='nm');self.plot.getAxis('bottom').enableAutoSIPrefix(False)
         self.plot.showGrid(x=True,y=True,alpha=.2)
@@ -125,7 +126,6 @@ class Workbench(W.QMainWindow):
     def set_peak_offset(self,offset):
         self.peak_offset=float(offset)
         self.align_button.setText(f'峰对齐 {offset:+.2f} nm' if offset else '峰对齐…')
-        self.align_button.setToolTip('只平移对比图的摄像头波长；不修改原始测量、校准或导出数据')
         self.refresh()
 
     def peak_alignment_dialog(self):
@@ -190,7 +190,8 @@ class Workbench(W.QMainWindow):
             if color not in self._tab_icons:
                 pixmap=QtGui.QPixmap(12,12);pixmap.fill(QtCore.Qt.GlobalColor.transparent)
                 painter=QtGui.QPainter(pixmap);painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing);painter.setPen(QtCore.Qt.PenStyle.NoPen);painter.setBrush(QtGui.QColor(color));painter.drawEllipse(1,1,10,10);painter.end();self._tab_icons[color]=QtGui.QIcon(pixmap)
-            bar.setTabTextColor(index,QtGui.QColor(color));bar.setTabIcon(index,self._tab_icons[color]);bar.setTabToolTip(index,self.tabs.tabText(index)+'：'+label)
+            bar.setTabTextColor(index,QtGui.QColor(color));bar.setTabIcon(index,self._tab_icons[color])
+            self.tabs.widget(index).setAccessibleDescription(self.tabs.tabText(index)+'：'+label)
 
     def compact_controls(self,session):
         session.compact_sidebar=True
@@ -317,6 +318,26 @@ class Workbench(W.QMainWindow):
         self.align_button.setVisible(index in (2,3))
         self.refresh()
 
+    def update_device_visibility(self):
+        if self._closing:return
+        detected=[session.device_present or session.ready for session in self.sessions]
+        key=tuple(detected)
+        if getattr(self,'_device_visibility_key',None)==key:return
+        self._device_visibility_key=key
+        for panel,present in zip(self.device_panels,detected):
+            if panel.isHidden()==bool(present):panel.setVisible(bool(present))
+        if self.no_devices.isHidden()!=any(detected):self.no_devices.setVisible(not any(detected))
+        visible=detected+[all(detected),all(detected)]
+        current=self.tabs.currentIndex()
+        with QtCore.QSignalBlocker(self.tabs):
+            for index,present in enumerate(visible):
+                if self.tabs.isTabVisible(index)!=bool(present):self.tabs.setTabVisible(index,bool(present))
+            if any(detected):
+                target=current if 0<=current<len(visible) and visible[current] else next(i for i,present in enumerate(detected) if present)
+                self.tabs.setCurrentIndex(target)
+        self.content.setCurrentIndex(0 if any(detected) else 1)
+        self.align_button.setVisible(any(detected) and self.tabs.currentIndex() in (2,3))
+
     def update_device_styles(self):
         if self._closing:return
         mode=self.sessions[0].theme.currentText()
@@ -327,6 +348,7 @@ class Workbench(W.QMainWindow):
         key=(dark,size,active)
         if getattr(self,'_device_style_key',None)==key:return
         self._device_style_key=key
+        self.no_devices.setStyleSheet('color:'+('#96a1ad' if dark else '#74808b')+';font-size:12pt;')
         for i,(panel,(background,accent,title)) in enumerate(zip(self.device_panels,palettes)):
             if active[i]:
                 background,accent=(('#244c6c','#83c9ff') if i==0 else ('#61472b','#ffd296')) if dark else (('#d4eaff','#277ab8') if i==0 else ('#ffe6bc','#ac681c'))
@@ -409,6 +431,7 @@ class Workbench(W.QMainWindow):
 
     def refresh(self,*_):
         if self._closing:return
+        self.update_device_visibility()
         if self.sessions[1].frame_data is not None:
             camera=self.sessions[1];meta=camera.frame_data.get('device',{})
             context=(repr(meta.get('camera_profile',{})),camera.calibration_enabled.isChecked(),camera.nonlinearity_enabled.isChecked())

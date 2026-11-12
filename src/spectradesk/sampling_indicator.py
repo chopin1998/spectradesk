@@ -15,7 +15,6 @@ class SamplingIndicator(W.QWidget):
     def begin(self,started,reset=False):
         if reset:self.period=None
         self.started=started;self.active=True
-        self.setToolTip('首次采样计时中' if self.period is None else f'采样周期 {self.period:.3f} 秒 · {1/self.period:.2f} Hz')
         self.timer.start();self.tick()
 
     def tick(self):
@@ -28,7 +27,6 @@ class SamplingIndicator(W.QWidget):
     def complete(self,period):
         self.period=max(float(period),1e-6);self.active=False;self.timer.stop()
         self.setVisible(self.period>.2)
-        self.setToolTip(f'采样周期 {self.period:.3f} 秒 · {1/self.period:.2f} Hz')
         self.update()
 
     def stop(self):

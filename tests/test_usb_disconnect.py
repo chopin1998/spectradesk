@@ -87,9 +87,9 @@ class FakeDevice:
 module.Driver=FakeDevice
 app=W.QApplication([])
 win=Window(Namespace(demo=False,connect=False,smoke=None,renderer='raster'));win.show()
-phase=0;errors=[]
+phase=0;errors=[];manual_wait=None
 def poll():
-    global phase
+    global phase,manual_wait
     try:
         assert not hasattr(win,'badge')
         if phase==0 and win.device_status.text()=='未找到光谱仪':
@@ -97,9 +97,9 @@ def poll():
             assert win.worker.driver is None
             assert win.device_status.parent() is win.connect_button.parent()
             FakeDevice.plugged=True;phase=1
-        elif phase==1 and win.connect_button.isEnabled():
-            assert win.device_present and not win.ready
-            win.toggle_connection();phase=2
+        elif phase==1 and win.ready:
+            assert win.device_present
+            phase=2
         elif phase==2 and win.ready:
             assert win.device_status.text()=='USB 已连接'
             assert win.worker.counter==0
@@ -113,8 +113,8 @@ def poll():
             assert not win.auto_button.isEnabled() and not win.info_button.isEnabled()
             assert win.serial_label.text()=='设备未连接'
             FakeDevice.plugged=True;phase=4
-        elif phase==4 and win.connect_button.isEnabled():
-            win.toggle_connection();phase=5
+        elif phase==4 and win.ready:
+            phase=5
         elif phase==5 and win.ready:
             assert win.device_status.text()=='USB 已连接'
             win.toggle_connection();phase=6
@@ -122,7 +122,9 @@ def poll():
             assert win.device_status.text()=='已找到设备 · 未连接'
             assert not win.ready and win.connect_button.isEnabled()
             assert win.connect_button.objectName()=='connect'
-            phase=7;timer.stop();win.close();app.quit()
+            import time
+            if manual_wait is None:manual_wait=time.monotonic()
+            if time.monotonic()-manual_wait>1.6:phase=7;timer.stop();win.close();app.quit()
     except BaseException as error:
         errors.append(error);timer.stop();win.close();app.quit()
 timer=QtCore.QTimer();timer.timeout.connect(poll);timer.start(50)
@@ -165,3 +167,45 @@ def test_usb_error_during_capture_immediately_disconnects(monkeypatch,mode):
     assert worker.auto_iterator is None
     assert states[-1]=='USB 已断开' and connections==[True,False]
     worker.discovery_timer.stop()
+
+
+@pytest.mark.parametrize('backend',['fla5000','camera'])
+def test_detected_device_auto_connects_once_and_respects_manual_disconnect(monkeypatch,backend):
+    app=QCoreApplication.instance() or QCoreApplication([])
+    class Device(FakeDevice):
+        plugged=False;fail_open=False;attempts=0
+        @classmethod
+        def device_available(cls):return cls.plugged
+        def open(self):
+            type(self).attempts+=1
+            if self.fail_open:raise RuntimeError('Device busy')
+            return super().open()
+        def set_exposure_auto(self,enabled):pass
+    monkeypatch.setattr(module,'Driver',Device)
+    monkeypatch.setattr(module,'CameraDriver',lambda *_:Device())
+    monkeypatch.setattr(module,'cameras',lambda:['/dev/test-camera'] if Device.plugged else [])
+    worker=module.Acquisition();worker.backend=backend
+    try:
+        worker.scan_devices();assert not worker.ready and Device.attempts==0
+        Device.plugged=True;worker.scan_devices()
+        assert worker.ready and Device.attempts==1
+        assert not worker.running and worker.counter==0 and not worker.timer.isActive()
+        worker.disconnect_device()
+        for _ in range(3):worker.scan_devices()
+        assert not worker.ready and Device.attempts==1
+        Device.plugged=False;worker.scan_devices()
+        Device.plugged=True;worker.scan_devices()
+        assert worker.ready and Device.attempts==2
+        worker.disconnect_device();Device.plugged=False;worker.scan_devices()
+        Device.fail_open=True;Device.plugged=True;worker.scan_devices()
+        assert not worker.ready and Device.attempts==3
+        for _ in range(3):worker.scan_devices()
+        assert not worker.ready and Device.attempts==3
+        Device.fail_open=False;worker.connect_device()
+        assert worker.ready and Device.attempts==4
+        # A confirmed unplug may be followed by replug before the next scan.
+        worker.fail(DeviceDisconnectedError('USB 设备已断开'));worker.scan_devices()
+        assert worker.ready and Device.attempts==5
+    finally:
+        worker.disconnect_device()
+        if worker.discovery_timer:worker.discovery_timer.stop()

@@ -30,13 +30,16 @@ class Acquisition(QObject):
     def __init__(self,demo=False):
         super().__init__();self.demo=demo;self.driver=None;self.timer=None;self.running=False;self.ready=False
         self.backend='fla5000';self.camera_path='';self.camera_profile=CameraProfile();self.camera_auto=True
+        self._auto_connect_attempted=False
         self.parameter=25;self.average=1;self.counter=0;self.auto_timer=None;self.auto_iterator=None;self.presence_timer=None;self.discovery_timer=None;self.available=None
     @Slot()
     def connect_device(self):
         try:
             if self.ready:return
+            self._auto_connect_attempted=True
             self.start_discovery()
             if not self.available:return
+            self.state.emit("正在连接…")
             if self.demo:
                 self.wave=np.linspace(279,975,2048,dtype=np.float32)
                 self.extra=((self.wave<365)|(self.wave>872)).astype(np.uint8)
@@ -59,7 +62,7 @@ class Acquisition(QObject):
     def configure_backend(self,config):
         self.disconnect_device()
         self.backend=config['backend'];self.camera_path=config.get('path','');self.camera_profile=config.get('profile',CameraProfile())
-        self.available=None;self.start_discovery()
+        self.available=None;self._auto_connect_attempted=False;self.start_discovery()
 
     def publish_availability(self,available):
         available=bool(available)
@@ -76,9 +79,21 @@ class Acquisition(QObject):
     def scan_devices(self):
         if self.ready or QThread.currentThread().isInterruptionRequested():return
         try:
-            available=self.demo or (self.camera_path in cameras() if self.backend=='camera' else Driver.device_available())
+            if self.backend=='camera':
+                detected=cameras()
+                # Startup with no camera must still discover a later insertion.
+                # Once selected, wait for that same device rather than another webcam.
+                if not self.camera_path:self.camera_path=self.camera_profile.device or next(iter(detected),'')
+                available=self.demo or self.camera_path in detected
+            else:available=self.demo or Driver.device_available()
+            # Only an observed physical absence re-arms automatic connection.
+            # Manual disconnects and failed opens must not trigger retry loops.
+            if not available:self._auto_connect_attempted=False
             if self.publish_availability(available):
                 self.state.emit('已找到光谱仪 · 未连接' if available else '未找到光谱仪')
+            if available and not self._auto_connect_attempted:
+                self._auto_connect_attempted=True
+                self.connect_device()
         except Exception as e:
             if self.publish_availability(False):self.state.emit('设备检测失败：'+str(e))
 
@@ -219,6 +234,8 @@ class Acquisition(QObject):
         self.state.emit("连续采集中" if self.running else "已连接 · 自动积分结束")
 
     def fail(self,e):
+        if isinstance(e,DeviceDisconnectedError) or (self.backend=='camera' and self.camera_path not in cameras()):
+            self._auto_connect_attempted=False
         self.stop_presence_monitor()
         if self.auto_timer:self.auto_timer.stop()
         if self.auto_iterator is not None:self.auto_iterator.close();self.auto_iterator=None
@@ -230,6 +247,7 @@ class Acquisition(QObject):
         self.error.emit(str(e));self.state.emit("USB 已断开" if isinstance(e,DeviceDisconnectedError) else "设备未连接")
     @Slot()
     def disconnect_device(self):
+        self._auto_connect_attempted=True
         if QThread.currentThread().isInterruptionRequested() and self.discovery_timer:self.discovery_timer.stop()
         self.stop_presence_monitor()
         self.stop()
