@@ -3,6 +3,18 @@ import time
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
 from .driver import Driver, DeviceDisconnectedError
+from .camera import CameraDriver, CameraProfile, cameras
+
+def choose_auto_average(single_frame_seconds, current_average):
+    """Keep 1–20 Hz settings; slow groups use one frame, fast groups target 20 Hz."""
+    current=max(1,min(8,int(current_average)))
+    if not np.isfinite(single_frame_seconds) or single_frame_seconds<=0:return current
+    period=max(.040,single_frame_seconds*current)  # acquisition timer interval
+    if period>1:return 1
+    if period<.050:
+        return max(current,min(8,int(np.ceil(.050/single_frame_seconds))))
+    return current
+
 
 class Acquisition(QObject):
     connected=Signal(object)
@@ -14,8 +26,10 @@ class Acquisition(QObject):
     error=Signal(str)
     auto_done=Signal(int,str)
     integration_changed=Signal(int)
+    average_changed=Signal(int)
     def __init__(self,demo=False):
         super().__init__();self.demo=demo;self.driver=None;self.timer=None;self.running=False;self.ready=False
+        self.backend='fla5000';self.camera_path='';self.camera_profile=CameraProfile();self.camera_auto=True
         self.parameter=25;self.average=1;self.counter=0;self.auto_timer=None;self.auto_iterator=None;self.presence_timer=None;self.discovery_timer=None;self.available=None
     @Slot()
     def connect_device(self):
@@ -27,8 +41,12 @@ class Acquisition(QObject):
                 self.wave=np.linspace(279,975,2048,dtype=np.float32)
                 self.extra=((self.wave<365)|(self.wave>872)).astype(np.uint8)
                 self.meta=dict(model="FLA5000 · 模拟",serial="DEMO",firmware="模拟数据",anchors=[])
+                if self.backend=='camera':
+                    self.wave,self.extra=self.camera_profile.wavelengths()
+                    self.meta=dict(model='Camera · 模拟',serial='DEMO-CAMERA',firmware='模拟数据',backend='camera',camera_profile={})
             else:
-                self.driver=Driver();self.meta,self.wave,self.extra=self.driver.open()
+                self.driver=CameraDriver(self.camera_path,self.camera_profile) if self.backend=='camera' else Driver();self.meta,self.wave,self.extra=self.driver.open()
+                if self.backend=='camera':self.driver.set_exposure_auto(self.camera_auto)
             self.ready=True;self.timer=QTimer(self);self.timer.setInterval(40);self.timer.timeout.connect(self.acquire)
             if not self.demo:
                 self.presence_timer=QTimer(self);self.presence_timer.setInterval(750)
@@ -37,6 +55,12 @@ class Acquisition(QObject):
             self.connected.emit(dict(meta=self.meta,wave=self.wave,extra=self.extra,demo=self.demo))
             self.state.emit("已连接 · 待采集")
         except Exception as e:self.fail(e)
+    @Slot(object)
+    def configure_backend(self,config):
+        self.disconnect_device()
+        self.backend=config['backend'];self.camera_path=config.get('path','');self.camera_profile=config.get('profile',CameraProfile())
+        self.available=None;self.start_discovery()
+
     def publish_availability(self,available):
         available=bool(available)
         changed=self.available is None or self.available!=available
@@ -52,7 +76,7 @@ class Acquisition(QObject):
     def scan_devices(self):
         if self.ready or QThread.currentThread().isInterruptionRequested():return
         try:
-            available=self.demo or Driver.device_available()
+            available=self.demo or (self.camera_path in cameras() if self.backend=='camera' else Driver.device_available())
             if self.publish_availability(available):
                 self.state.emit('已找到光谱仪 · 未连接' if available else '未找到光谱仪')
         except Exception as e:
@@ -72,7 +96,7 @@ class Acquisition(QObject):
     def start(self,parameter,average,continuous):
         if not self.ready or self.auto_iterator is not None:return
         try:
-            self.parameter=parameter;self.average=average
+            self.parameter=parameter;self.average=max(1,min(8,int(average)))
             if self.driver:self.driver.set_parameter(parameter)
             self.integration_changed.emit(parameter)
             self.running=continuous
@@ -80,10 +104,18 @@ class Acquisition(QObject):
             self.state.emit("连续采集中" if continuous else "单次采集中")
             self.acquire()
         except Exception as e:self.fail(e)
+    @Slot(bool)
+    def set_camera_auto(self,enabled):
+        self.camera_auto=bool(enabled)
+        if self.backend=='camera' and self.driver is not None:
+            try:
+                self.driver.set_exposure_auto(enabled)
+                if not enabled:self.driver.set_parameter(self.parameter)
+            except Exception as e:self.error.emit(str(e))
     @Slot(int)
     def set_average(self,average):
         # Queued on the acquisition thread: never split an in-flight group.
-        if 1<=average<=64:self.average=average
+        self.average=max(1,min(8,int(average)))
     @Slot(int)
     def set_integration(self,parameter):
         if not self.ready or self.auto_iterator is not None:return
@@ -104,10 +136,18 @@ class Acquisition(QObject):
                     signal+=height*np.exp(-.5*((x-center)/width)**2)
                 counts=1965+signal*self.parameter/50
                 rng=np.random.default_rng()
-                frames=np.clip(32767-np.minimum(counts,16640)+rng.normal(0,12,(self.average,2048)),0,65535).astype(np.uint16)
+                frames=np.clip(32767-np.minimum(counts,16640)+rng.normal(0,12,(self.average,len(x))),0,65535).astype(np.uint16)
+                if self.backend=='camera':
+                    frames=np.clip(signal[None,:]/80+rng.normal(0,.1,(self.average,len(x))),0,255).astype(np.float32)
             else:frames=self.driver.capture(self.average)
             self.counter+=1
-            self.frame.emit(dict(wave=self.wave,extra=self.extra,adc_frames=frames,mean=32767-frames.mean(axis=0),parameter=self.parameter,average=self.average,utc=datetime.now(timezone.utc).isoformat(),elapsed=time.monotonic()-started,index=self.counter,device=self.meta,demo=self.demo))
+            payload=dict(wave=self.wave,extra=self.extra,adc_frames=frames,mean=32767-frames.mean(axis=0),parameter=self.parameter,average=self.average,utc=datetime.now(timezone.utc).isoformat(),elapsed=time.monotonic()-started,index=self.counter,device=self.meta,demo=self.demo)
+            if self.backend=='camera':
+                payload.update(mean=frames.mean(axis=0),intensity_unit='camera DN',backend='camera',camera_image=(np.zeros((self.camera_profile.height,self.camera_profile.width,3),dtype=np.uint8) if self.demo else self.driver.image),saturated=(False if self.demo else self.driver.saturated),wavelength_method='camera pixel calibration')
+            if self.backend=='camera' and not self.demo:
+                payload.update(camera_exposure_mode='spectrum-auto' if self.camera_auto else 'manual',camera_exposure_ms=getattr(self.driver,'exposure_used',self.parameter)/10)
+                payload['parameter']=getattr(self.driver,'exposure_used',self.parameter)
+            self.frame.emit(payload)
             if not self.running:self.state.emit("已连接 · 采集完成")
         except Exception as e:self.fail(e)
     @Slot()
@@ -119,10 +159,11 @@ class Acquisition(QObject):
         self.state.emit("已连接 · 已停止" if self.ready else "未连接")
     @Slot()
     def auto(self):
+        if self.backend=='camera':return
         if not self.ready or self.auto_iterator is not None:return
         self.auto_resume=self.running;self.running=False
         if self.timer:self.timer.stop()
-        self.auto_started=time.monotonic()
+        self.auto_started=time.monotonic();self.auto_frame_times=[];self.auto_timing_parameter=None
         self.auto_iterator=self.demo_auto_steps() if self.demo else self.driver.auto_steps()
         if self.auto_timer is None:
             self.auto_timer=QTimer(self);self.auto_timer.setSingleShot(True)
@@ -143,7 +184,14 @@ class Acquisition(QObject):
         if time.monotonic()-self.auto_started>=30:
             self.finish_auto("自动积分已达 30 秒时限，请调整光强或手动设置");return
         try:
+            started=time.monotonic()
             step,frame,parameter=next(self.auto_iterator)
+            duration=time.monotonic()-started
+            if parameter!=self.auto_timing_parameter:
+                self.auto_frame_times=[];self.auto_timing_parameter=parameter
+            # The first frame also includes changing integration and prior-round
+            # analysis. Measure only subsequent frames at the final setting.
+            if frame>1:self.auto_frame_times.append(duration)
             self.parameter=parameter;self.integration_changed.emit(parameter)
             self.state.emit(f"自动积分 · 第 {step}/16 轮 · {frame}/3 帧 · 参数 {parameter}")
             self.auto_timer.start(0)
@@ -151,6 +199,12 @@ class Acquisition(QObject):
             parameter,peak,steps,status=done.value;self.parameter=parameter
             reason={1:"光线过强，已到最小积分",2:"光线过弱，已到最大积分",3:"调整未收敛，请手动设置"}.get(status)
             message=(reason if reason else "自动完成")+f"：参数 {parameter}，峰值 {peak:.0f}，{steps} 次调整"
+            if self.auto_frame_times and self.auto_timing_parameter==parameter:
+                seconds=float(np.median(self.auto_frame_times))
+                self.average=choose_auto_average(seconds,self.average)
+                self.average_changed.emit(self.average)
+                hz=1/max(.040,seconds*self.average)
+                message+=f"，平均 {self.average} 帧，预计 {hz:.1f} Hz"
             self.finish_auto(message)
         except Exception as e:self.fail(e)
 

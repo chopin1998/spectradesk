@@ -1,15 +1,22 @@
 from __future__ import annotations
 import argparse,json,os,sys,time
 from pathlib import Path
+from dataclasses import asdict
 import numpy as np
+from shiboken6 import isValid
 from PySide6 import QtCore,QtGui,QtWidgets as W
 import pyqtgraph as pg
+from .spectrum_plot import SpectrumPlot,style_spectrum_curve
 from .worker import Acquisition
+from .number_input import DigitSpinBox, DigitDoubleSpinBox
+from .camera_band import CameraBand
+from .camera import CameraProfile, cameras, wavelength_aligned_strip, display_camera_profile
+from .camera_dialog import CameraDialog
 from .plot_view import SpectrumViewBox
 from .sampling_indicator import SamplingIndicator
 from .phosphor import PhosphorImage
 from .gpu_curve import GpuSpectrumCurve
-from .analysis import analyze,display_smooth
+from .analysis import analyze,display_smooth,integrate_peak
 from .storage import save_measurement
 from .calibration import profile_for, correct_counts, sta_smooth
 
@@ -108,20 +115,61 @@ def acquire_instance_lock(directory=None):
 
 
 class Window(W.QMainWindow):
+    backend_request=QtCore.Signal(object)
     connect_request=QtCore.Signal();disconnect_request=QtCore.Signal()
-    integration_request=QtCore.Signal(int);average_request=QtCore.Signal(int);start_request=QtCore.Signal(int,int,bool);stop_request=QtCore.Signal();auto_request=QtCore.Signal()
+    integration_request=QtCore.Signal(int);exposure_auto_request=QtCore.Signal(bool);average_request=QtCore.Signal(int);start_request=QtCore.Signal(int,int,bool);stop_request=QtCore.Signal();auto_request=QtCore.Signal()
     def __init__(self,args):
-        super().__init__();self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self.sampling_context=None;self.capture_started_at=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
+        super().__init__();self._closing=False;self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self.sampling_context=None;self.capture_started_at=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
         self.setWindowTitle('SpectraDesk · 光谱测量工作台');area=W.QApplication.primaryScreen().availableGeometry();self.resize(min(1560,int(area.width()*.94)),min(1000,int(area.height()*.94)));self.setMinimumSize(1180,760)
+        self.camera_profile_path=Path(QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.StandardLocation.AppConfigLocation))/'camera-profile.json'
+        self.camera_profile=CameraProfile.load(Path(__file__).with_name('data')/'camera-2025051804.json')
+        if self.camera_profile_path.exists():
+            try:self.camera_profile=CameraProfile.load(self.camera_profile_path)
+            except (ValueError,TypeError,OSError):pass
+        self.camera_path=self.camera_profile.device or next(iter(cameras()),'')
         self.build();self.restore_settings()
-        self.thread=QtCore.QThread(self);self.worker=Acquisition(args.demo);self.worker.moveToThread(self.thread)
+        self.thread=QtCore.QThread(self);self.worker=Acquisition(args.demo);self.worker.backend=getattr(args,"backend","fla5000");self.worker.parameter=self.integration.value();self.worker.camera_path=self.camera_path;self.worker.camera_profile=self.camera_profile;self.worker.moveToThread(self.thread)
+        self.backend_request.connect(self.worker.configure_backend)
         self.connect_request.connect(self.worker.connect_device);self.disconnect_request.connect(self.worker.disconnect_device)
-        self.average_request.connect(self.worker.set_average);self.integration_request.connect(self.worker.set_integration);self.start_request.connect(self.worker.start);self.stop_request.connect(self.worker.stop);self.auto_request.connect(self.worker.auto)
-        self.worker.device_available.connect(self.on_device_available);self.worker.connection_changed.connect(self.on_connection_changed);self.worker.connected.connect(self.on_connected);self.worker.capture_started.connect(self.on_capture_started);self.worker.frame.connect(self.on_frame);self.worker.state.connect(self.on_state);self.worker.error.connect(self.on_error);self.worker.auto_done.connect(self.on_auto);self.worker.integration_changed.connect(self.update_integration)
+        self.average_request.connect(self.worker.set_average);self.integration_request.connect(self.worker.set_integration);self.exposure_auto_request.connect(self.worker.set_camera_auto);self.start_request.connect(self.worker.start);self.stop_request.connect(self.worker.stop);self.auto_request.connect(self.worker.auto)
+        self.worker.device_available.connect(self.on_device_available);self.worker.connection_changed.connect(self.on_connection_changed);self.worker.connected.connect(self.on_connected);self.worker.capture_started.connect(self.on_capture_started);self.worker.frame.connect(self.on_frame);self.worker.state.connect(self.on_state);self.worker.error.connect(self.on_error);self.worker.auto_done.connect(self.on_auto);self.worker.integration_changed.connect(self.update_integration);self.worker.average_changed.connect(self.update_average)
         self.thread.finished.connect(self.worker.deleteLater);self.thread.start()
+        self.exposure_auto_request.emit(self.camera_exposure_auto.isChecked())
+        if getattr(args,'backend',None):
+            with QtCore.QSignalBlocker(self.backend_selector):self.backend_selector.setCurrentIndex(int(args.backend=='camera'))
+            self.backend_selector.hide()
+            self.device_label.setText('Camera / Theremino' if args.backend=='camera' else 'FLIGHT FLA5000')
         self.set_controls(False)
-        QtCore.QTimer.singleShot(150,self.connect_request.emit)
+        self._startup_timer=QtCore.QTimer(self);self._startup_timer.setSingleShot(True);self._startup_timer.timeout.connect(self.connect_request.emit);self._startup_timer.start(150)
         if args.smoke:QtCore.QTimer.singleShot(15000,self.smoke_timeout)
+    def select_backend(self,index):
+        if not hasattr(self,'worker'):return
+        self.frame_data=None;self.profile=None;self.dark=None;self.save_button.setEnabled(False)
+        self.curve.setData([],[]);self.raw_curve.setData([],[]);self.markers.clear();self.table.setRowCount(0)
+        self.device_label.setText('Camera / Theremino' if index else 'FLIGHT FLA5000')
+        self.backend_request.emit(dict(backend='camera' if index else 'fla5000',path=self.camera_path,profile=self.camera_profile))
+        self.set_controls(False)
+
+    def clear_camera_dark_for_exposure(self,*_):
+        if self.backend_selector.currentIndex()==1 and self.dark is not None:
+            self.dark=None;self.camera_dark.setText('记录当前暗背景');self.render()
+    def capture_camera_dark(self):
+        if self.backend_selector.currentIndex()==1 and self.dark is None and self.camera_exposure_auto.isChecked():
+            W.QMessageBox.information(self,'记录暗背景','请先关闭光谱自动曝光，固定曝光后再记录暗背景。');return
+        if self.dark is not None:self.dark=None;self.camera_dark.setText('记录当前暗背景')
+        elif self.frame_data is not None and self.frame_data.get('backend')=='camera':
+            self.dark=dict(counts=self.frame_data['mean'].copy(),utc=self.frame_data['utc']);self.camera_dark.setText('清除暗背景')
+        self.render()
+
+    def configure_camera(self):
+        dialog=CameraDialog(self.camera_profile,self.camera_path,self.frame_data,self)
+        if dialog.exec()==W.QDialog.DialogCode.Accepted:
+            try:
+                dialog.profile.save(self.camera_profile_path)
+                self.camera_profile=dialog.profile;self.camera_path=dialog.profile.device
+                self.select_backend(1)
+            except Exception as e:W.QMessageBox.warning(self,'保存失败',str(e))
+
     def label(self,text,kind=None):
         w=W.QLabel(text)
         if kind:w.setObjectName(kind)
@@ -135,23 +183,28 @@ class Window(W.QMainWindow):
         self.info_button=W.QPushButton('设备与校准');self.info_button.clicked.connect(self.show_info);self.info_button.setEnabled(False);header.addWidget(self.info_button)
         self.save_button=W.QPushButton('保存测量…');self.save_button.clicked.connect(self.save);self.save_button.setEnabled(False);header.addWidget(self.save_button);outer.addLayout(header)
         body=W.QHBoxLayout();body.setSpacing(16);outer.addLayout(body,1)
-        sidebar=W.QWidget();sidebar.setObjectName('root');sidebar.setFixedWidth(max(310,self.fontMetrics().horizontalAdvance('STA 名义毫秒 · ×50 换算')+80));side=W.QVBoxLayout(sidebar);side.setContentsMargins(0,0,0,0);side.setSpacing(12);side.setSizeConstraint(W.QLayout.SizeConstraint.SetMinimumSize)
-        panel,l=self.card();l.addWidget(self.label('设备','section'));self.device_label=self.label('FLIGHT FLA5000');self.device_label.setStyleSheet('font-weight:600');l.addWidget(self.device_label)
-        self.serial_label=self.label('USB  f0d0:5001 · 2048 像素','muted');l.addWidget(self.serial_label)
+        sidebar=W.QWidget();sidebar.setObjectName('root');sidebar.setFixedWidth(max(310,self.fontMetrics().horizontalAdvance('STA 名义毫秒 · ×50 换算')+80));side=W.QVBoxLayout(sidebar);side.setContentsMargins(0,0,0,0);side.setSpacing(12);side.setSizeConstraint(W.QLayout.SizeConstraint.SetMinAndMaxSize)
+        panel,l=self.card();l.addWidget(self.label('设备','section'));self.backend_selector=W.QComboBox();self.backend_selector.addItems(['FLIGHT FLA5000','Camera / Theremino']);self.backend_selector.currentIndexChanged.connect(self.select_backend);l.addWidget(self.backend_selector);self.camera_button=W.QPushButton('相机预览与波长校准…');self.camera_button.clicked.connect(self.configure_camera);l.addWidget(self.camera_button);self.camera_dark=W.QPushButton('记录当前暗背景');self.camera_dark.clicked.connect(self.capture_camera_dark);l.addWidget(self.camera_dark);self.device_label=self.label('FLIGHT FLA5000');self.device_label.setStyleSheet('font-weight:600');l.addWidget(self.device_label)
+        self.serial_label=self.label('USB  f0d0:5001 · 2048 像素','muted');self.serial_label.setWordWrap(True);self.serial_label.setSizePolicy(W.QSizePolicy.Policy.Ignored,W.QSizePolicy.Policy.Preferred);l.addWidget(self.serial_label)
         self.device_status=self.label('模拟模式' if self.args.demo else '正在寻找光谱仪…','deviceStatus');self.device_status.setWordWrap(True);l.addWidget(self.device_status)
         self.connect_button=W.QPushButton('连接光谱仪');self.connect_button.clicked.connect(self.toggle_connection);l.addWidget(self.connect_button);side.addWidget(panel)
         panel,l=self.card();l.addWidget(self.label('采集控制','section'))
         self.integration_label=self.label('积分时间 · 250');l.addWidget(self.integration_label)
-        self.integration=W.QSpinBox();self.integration.setRange(15,65535);self.integration.setValue(250);self.integration.setKeyboardTracking(False);self.integration.valueChanged.connect(self.integration_request.emit);self.integration.valueChanged.connect(self.update_integration_label);l.addWidget(self.integration)
+        self.integration=DigitSpinBox();self.integration.setRange(15,65535);self.integration.setValue(250);self.integration.setKeyboardTracking(False);self.integration.valueChanged.connect(self.integration_request.emit);self.integration.valueChanged.connect(self.update_integration_label);l.addWidget(self.integration)
+        self.camera_exposure=DigitDoubleSpinBox();self.camera_exposure.setRange(7.8,1000.0);self.camera_exposure.setDecimals(1);self.camera_exposure.setSingleStep(.1);self.camera_exposure.setSuffix(' ms');self.camera_exposure.setValue(self.integration.value()/10);self.camera_exposure.setKeyboardTracking(False)
+        self.camera_exposure.setToolTip('相机曝光时间，以毫秒显示；驱动原始值每单位为 0.1 ms。')
+        self.camera_exposure.valueChanged.connect(lambda value:self.integration.setValue(round(value*10)));l.addWidget(self.camera_exposure)
+        self.camera_exposure_status=W.QLabel('实际曝光：待采集');self.camera_exposure_status.setWordWrap(True);l.addWidget(self.camera_exposure_status)
+        self.camera_exposure_auto=W.QCheckBox('光谱自动曝光');self.camera_exposure_auto.setToolTip('按光谱取样条带自动调节曝光；最短7.8 ms，达到最短仍饱和时需减弱入光。');self.camera_exposure_auto.setChecked(True);self.camera_exposure_auto.toggled.connect(self.exposure_auto_request.emit);self.camera_exposure_auto.toggled.connect(self.set_controls_for_exposure);self.camera_exposure_auto.toggled.connect(self.clear_camera_dark_for_exposure);self.integration.valueChanged.connect(self.clear_camera_dark_for_exposure);l.addWidget(self.camera_exposure_auto)
         self.auto_button=W.QPushButton('自动选择积分');self.auto_button.clicked.connect(self.request_auto);l.addWidget(self.auto_button)
-        row=W.QHBoxLayout();row.addWidget(self.label('平均帧数'));self.average=W.QSpinBox();self.average.setRange(1,64);self.average.setValue(2);self.average.setKeyboardTracking(False);self.average.valueChanged.connect(self.average_request.emit);self.average.setToolTip('这里填写实际采集帧数。已验证 STA 的“平均1”读取两帧，对照时这里选2。');row.addWidget(self.average);l.addLayout(row)
+        row=W.QHBoxLayout();row.addWidget(self.label('平均帧数'));self.average=W.QSpinBox();self.average.setRange(1,8);self.average.setValue(2);self.average.setKeyboardTracking(False);self.average.valueChanged.connect(self.average_request.emit);self.average.setToolTip('实际采集帧数，范围 1–8。自动积分后：低于 1 Hz 改为 1 帧，高于约 20 Hz 适当增加。STA 的“平均1”读取两帧，对照时这里选2。');row.addWidget(self.average);l.addLayout(row)
         row=W.QHBoxLayout();self.single=W.QPushButton('单次');self.single.clicked.connect(lambda:self.start(False));self.run=W.QPushButton('连续采集');self.run.setObjectName('primary');self.run.clicked.connect(self.toggle_acquisition);row.addWidget(self.single);row.addWidget(self.run);l.addLayout(row)
         side.addWidget(panel)
         panel,l=self.card();l.addWidget(self.label('显示','section'));self.mode=W.QComboBox();self.mode.addItems(['专业单色线','连续彩虹线','彩虹填充谱','荧光余辉']);self.mode.currentIndexChanged.connect(self.render);l.addWidget(self.mode)
-        row=W.QHBoxLayout();row.addWidget(self.label('平滑'));self.smooth=W.QSpinBox();self.smooth.setRange(0,50);self.smooth.setSpecialValueText('关闭');self.smooth.setValue(1);self.smooth.setToolTip('N 对应 2N 个点，仅影响显示与STA对照导出；分析使用未平滑校正数据。设备校正模式复现STA尾部不平滑规则。');self.smooth.valueChanged.connect(self.render);row.addWidget(self.smooth);l.addLayout(row)
+        row=W.QHBoxLayout();row.addWidget(self.label('平滑'));self.smooth=W.QSpinBox();self.smooth.setRange(0,8);self.smooth.setSpecialValueText('关闭');self.smooth.setValue(1);self.smooth.setToolTip('N 对应 2N 个点，仅影响显示与STA对照导出；分析使用未平滑校正数据。设备校正模式复现STA尾部不平滑规则。');self.smooth.valueChanged.connect(self.render);row.addWidget(self.smooth);l.addLayout(row)
         self.overlay=W.QCheckBox('叠加未平滑曲线');self.overlay.setChecked(True);self.overlay.toggled.connect(self.render);l.addWidget(self.overlay)
         l.addWidget(self.label('显示波长范围 / nm'))
-        row=W.QHBoxLayout();self.display_start=W.QDoubleSpinBox();self.display_end=W.QDoubleSpinBox()
+        row=W.QHBoxLayout();self.display_start=DigitDoubleSpinBox();self.display_end=DigitDoubleSpinBox()
         for box,value in ((self.display_start,280),(self.display_end,973)):
             box.setDecimals(1);box.setRange(200,1100);box.setValue(value);box.setKeyboardTracking(False);box.valueChanged.connect(self.render);row.addWidget(box)
         l.addLayout(row)
@@ -159,51 +212,64 @@ class Window(W.QMainWindow):
         panel,l=self.card();l.addWidget(self.label('设备校正','section'))
         self.calibration_enabled=W.QCheckBox('应用设备校正');self.calibration_enabled.setChecked(True);self.calibration_enabled.toggled.connect(self.render);l.addWidget(self.calibration_enabled)
         self.nonlinearity_enabled=W.QCheckBox('非线性修正');self.nonlinearity_enabled.setChecked(True);self.nonlinearity_enabled.toggled.connect(self.render);l.addWidget(self.nonlinearity_enabled)
+        self.camera_before_overlay=W.QCheckBox('叠加校准前曲线（灰色虚线）');self.camera_before_overlay.setVisible(getattr(self.args,'backend','')=='camera');self.camera_before_overlay.toggled.connect(self.render);l.addWidget(self.camera_before_overlay)
         self.calibration_label=self.label('连接后按序列号匹配校准档案','muted');self.calibration_label.setWordWrap(True);l.addWidget(self.calibration_label);side.addWidget(panel)
         side.addStretch();scroll=W.QScrollArea();scroll.setWidgetResizable(True);scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff);scroll.setFixedWidth(sidebar.width()+16);scroll.setWidget(sidebar);body.addWidget(scroll)
         main=W.QVBoxLayout();main.setSpacing(12);body.addLayout(main,1)
-        cards=W.QHBoxLayout();self.metric_labels=[]
+        cards=W.QHBoxLayout();self.metric_labels=[];self.metric_units=[]
         for title,unit in [('主峰波长','nm'),('半高全宽 FWHM','nm'),('峰顶强度','counts')]:
-            card,cl=self.card();cl.setSpacing(3);cl.addWidget(self.label(title,'section'));metric=self.label('—','metric');cl.addWidget(metric);cl.addWidget(self.label(unit,'muted'));self.metric_labels.append(metric);cards.addWidget(card)
+            card,cl=self.card();cl.setSpacing(3);cl.addWidget(self.label(title,'section'));metric=self.label('—','metric');cl.addWidget(metric);unit_label=self.label(unit,'muted');cl.addWidget(unit_label);self.metric_units.append(unit_label);self.metric_labels.append(metric);cards.addWidget(card)
         main.addLayout(cards)
         graph,l=self.card();graph.setMinimumHeight(220);l.setContentsMargins(12,10,12,10)
         topline=W.QHBoxLayout();topline.addWidget(self.label('光谱 / SPECTRUM','section'));topline.addStretch();self.cursor_label=self.label('移动鼠标查看波长与强度','muted');topline.addWidget(self.cursor_label);l.addLayout(topline)
+        self.raw_preview_toggle=W.QCheckBox('显示原始光带');header.insertWidget(2,self.raw_preview_toggle)
+        self.raw_preview_toggle.setVisible(getattr(self.args,'backend','')=='camera')
+        self.raw_preview=W.QWidget();preview_layout=W.QHBoxLayout(self.raw_preview);preview_layout.setContentsMargins(0,0,0,0)
+        self.raw_band_plot=CameraBand(self);self.raw_band=self.raw_band_plot;preview_layout.addWidget(self.raw_band_plot)
+        self.pixel_plot=pg.PlotWidget();self.pixel_plot.setLabel('bottom','全图像素（翻转后）');self.pixel_plot.setLabel('left','原始灰度 DN');self.pixel_curve=self.pixel_plot.plot(pen=pg.mkPen('#e29a32',width=1));self.pixel_plot.hide()
+        self.raw_preview.setFixedHeight(52);self.raw_preview.hide();l.addWidget(self.raw_preview)
+        self.raw_preview_toggle.toggled.connect(self.show_raw_preview)
+        self.raw_preview_toggle.setChecked(getattr(self.args,'backend','')=='camera')
         pg.setConfigOptions(antialias=False,background='#ffffff',foreground='#526477')
-        self.spectrum_view=SpectrumViewBox();self.plot=pg.PlotWidget(viewBox=self.spectrum_view);self.plot.useOpenGL(getattr(self.args,'renderer','opengl')=='opengl');self.plot.setLabel('bottom','Wavelength',units='nm');self.plot.setLabel('left','Intensity',units='counts');self.plot.showGrid(x=True,y=True,alpha=.13);self.plot.setMouseEnabled(x=False,y=False);self.plot.setMenuEnabled(False)
-        self.plot.getAxis('left').enableAutoSIPrefix(False);
+        self.spectrum_view=SpectrumViewBox();self.plot=SpectrumPlot(viewBox=self.spectrum_view,renderer=getattr(self.args,'renderer','opengl'));self.plot.setLabel('bottom','Wavelength (nm)');self.plot.setLabel('left','Intensity',units='counts');self.plot.showGrid(x=True,y=True,alpha=.13);self.plot.setMouseEnabled(x=False,y=False);self.plot.setMenuEnabled(False)
+        self.spectrum_view.sigResized.connect(self.align_raw_band)
+        self.spectrum_view.sigRangeChanged.connect(self.align_raw_band)
+        self.plot.getAxis('left').enableAutoSIPrefix(False);self.plot.getAxis('bottom').enableAutoSIPrefix(False);
         for name in ('left','bottom'):
             axis=self.plot.getAxis(name);axis.setTickFont(self.font());axis.label.setFont(self.font())
         self.plot.setXRange(350,950,padding=0);self.plot.setYRange(0,16000,padding=0)
+        self.camera_before_curve=self.plot.plot(pen=pg.mkPen('#9eabb9',width=1.5,style=QtCore.Qt.PenStyle.DashLine))
         self.raw_curve=self.plot.plot(pen=pg.mkPen('#abb7c4',width=1))
-        if getattr(self.args,'renderer','opengl')=='opengl':
-            self.curve=GpuSpectrumCurve(pen=pg.mkPen('#245b8f',width=1.8));self.plot.addItem(self.curve)
-        else:self.curve=self.plot.plot(pen=pg.mkPen('#245b8f',width=1.8))
-        self.markers=pg.ScatterPlotItem(size=7,brush='#a96820',pen=None);self.plot.addItem(self.markers)
+        self.curve=self.plot.create_curve(pen=pg.mkPen('#245b8f',width=1.8))
+        self.markers=pg.ScatterPlotItem(size=7,brush='#a96820',pen=None);self.plot.addItem(self.markers);self.plot.removeItem(self.markers)
         # Raster drawLines is much cheaper for dense gradient spectra than drawPath.
         self.curve.curve.setSegmentedLineMode('on');self.raw_curve.curve.setSegmentedLineMode('on')
         self.phosphor=PhosphorImage();self.phosphor.hide();self.plot.addItem(self.phosphor,ignoreBounds=True)
         if getattr(self.args,'renderer','opengl')=='cached-image':
             for item in (self.curve.curve,self.raw_curve.curve):item.setCacheMode(W.QGraphicsItem.CacheMode.DeviceCoordinateCache)
         self.halfline=self.plot.plot(pen=pg.mkPen('#a96820',width=1,style=QtCore.Qt.PenStyle.DashLine))
+        self.area_starts=pg.ScatterPlotItem(size=10,symbol='t1',brush='#20bfc4',pen=pg.mkPen('#14777a'));self.plot.addItem(self.area_starts,ignoreBounds=True)
+        self.area_ends=pg.ScatterPlotItem(size=10,symbol='t',brush='#ee9980',pen=pg.mkPen('#995137'));self.plot.addItem(self.area_ends,ignoreBounds=True)
         self.cursor_wave=None
         self.cursor_marker=pg.ScatterPlotItem(size=11,symbol='o',pxMode=True,brush='#ffe066',pen=pg.mkPen('#805615',width=1.5))
-        self.cursor_marker.setZValue(50);self.cursor_marker.hide();self.plot.addItem(self.cursor_marker,ignoreBounds=True)
+        self.cursor_marker.setZValue(50);self.cursor_marker.hide();self.plot.addItem(self.cursor_marker,ignoreBounds=True);self.plot.removeItem(self.cursor_marker)
         self.plot.viewport().setCursor(QtCore.Qt.CursorShape.ArrowCursor);self.spectrum_view.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
-        self.plot.viewport().installEventFilter(self);self.plot.scene().sigMouseMoved.connect(self.mouse_moved)
+        self.plot.viewport().installEventFilter(self);self.plot.cursorMoved.connect(self.shared_cursor_moved)
         self.baseline=pg.InfiniteLine(pos=0,angle=0,movable=False,pen=pg.mkPen('#8a98a5',style=QtCore.Qt.PenStyle.DashLine));self.plot.addItem(self.baseline)
         l.addWidget(self.plot,1)
         self.navigation_label=self.label('','muted');self.navigation_label.setWordWrap(True);l.addWidget(self.navigation_label)
         self.spectrum_view.sigRangeChanged.connect(self.update_navigation)
         self.warning_label=self.label('','muted');self.warning_label.setWordWrap(True);self.warning_label.hide();l.addWidget(self.warning_label);main.addWidget(graph,1)
         panel,l=self.card();top=W.QHBoxLayout();top.addWidget(self.label('峰值分析','section'));top.addStretch();top.addWidget(self.label('分析范围 / nm','muted'))
-        self.range_start=W.QDoubleSpinBox();self.range_end=W.QDoubleSpinBox()
+        self.range_start=DigitDoubleSpinBox();self.range_end=DigitDoubleSpinBox()
         for box,value in [(self.range_start,350),(self.range_end,900)]:box.setDecimals(1);box.setRange(200,1100);box.setValue(value);box.setFixedWidth(max(118,self.fontMetrics().horizontalAdvance('1100.0')+48));box.valueChanged.connect(self.render);top.addWidget(box)
-        l.addLayout(top);self.table=W.QTableWidget(0,4);self.table.setHorizontalHeaderLabels(['峰位 / nm','强度 / counts','FWHM / nm','质量提示']);self.table.horizontalHeader().setSectionResizeMode(W.QHeaderView.ResizeMode.Stretch);self.table.verticalHeader().hide();self.table.setEditTriggers(W.QAbstractItemView.EditTrigger.NoEditTriggers);self.table.setSelectionBehavior(W.QAbstractItemView.SelectionBehavior.SelectRows);self.table.verticalHeader().setDefaultSectionSize(self.fontMetrics().height()+12);self.table.setMinimumHeight(120);self.table.setMaximumHeight(200);self.table.setAlternatingRowColors(True);l.addWidget(self.table)
+        l.addLayout(top);self.table=W.QTableWidget(0,6);self.table.setHorizontalHeaderLabels(['峰位 / nm','强度 / counts','FWHM / nm','起点 / nm','终点 / nm','峰面积\ncounts·nm']);self.table.horizontalHeader().setSectionResizeMode(W.QHeaderView.ResizeMode.Stretch);self.table.horizontalHeader().setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignCenter);self.table.verticalHeader().hide();self.table.setEditTriggers(W.QAbstractItemView.EditTrigger.NoEditTriggers);self.table.setSelectionBehavior(W.QAbstractItemView.SelectionBehavior.SelectRows);self.table.verticalHeader().setDefaultSectionSize(self.fontMetrics().height()+12);self.table.setMinimumHeight(120);self.table.setMaximumHeight(200);self.table.setAlternatingRowColors(True);l.addWidget(self.table)
         main.addWidget(panel)
         self.status=self.statusBar();self.status.showMessage('正在寻找光谱仪…')
         self.sampling_indicator=SamplingIndicator();self.status.addPermanentWidget(self.sampling_indicator)
         self.measure_status=self.label('— 帧  ·  — Hz','muted');self.status.addPermanentWidget(self.measure_status)
     def set_controls(self,ready):
+        if self._closing:return
         self.ready=ready
         self.device_status.setProperty("connected",ready);self.device_status.style().unpolish(self.device_status);self.device_status.style().polish(self.device_status)
         self.info_button.setEnabled(ready)
@@ -212,12 +278,27 @@ class Window(W.QMainWindow):
         self.run.setEnabled(ready)
         self.connect_button.setEnabled((ready or self.device_present) and not self.connecting and not getattr(self,'auto_busy',False))
         running=getattr(self,'continuous',False) or getattr(self,'auto_busy',False);self.run.setText('取消自动积分' if getattr(self,'auto_busy',False) else ('停止采集' if running else '连续采集'));self.run.setObjectName('running' if running else 'primary');self.run.style().unpolish(self.run);self.run.style().polish(self.run)
+        camera=self.backend_selector.currentIndex()==1
+        self.backend_selector.setEnabled(not ready and not self.connecting)
+        self.camera_dark.setVisible(camera);self.camera_dark.setEnabled(ready and self.frame_data is not None);self.camera_button.setVisible(camera);self.camera_button.setEnabled(not ready and not self.connecting)
+        self.raw_preview_toggle.setVisible(camera);self.raw_preview.setVisible(camera and self.raw_preview_toggle.isChecked())
+        self.camera_exposure_auto.setVisible(camera);self.camera_exposure_status.setVisible(camera)
+        minimum,maximum=(78,10000) if camera else (15,65535)
+        if (self.integration.minimum(),self.integration.maximum())!=(minimum,maximum):self.integration.setRange(minimum,maximum)
+        self.update_integration_label(self.integration.value())
+        self.integration.setVisible(not camera);self.camera_exposure.setVisible(camera and not self.camera_exposure_auto.isChecked());self.integration_label.setVisible(not camera or not self.camera_exposure_auto.isChecked());self.auto_button.setVisible(not camera)
         self.integration.setEnabled(not getattr(self,'auto_busy',False))
         self.average.setEnabled(not getattr(self,'auto_busy',False))
         self.connect_button.setText('断开设备' if ready else '连接光谱仪')
         self.connect_button.setObjectName('disconnect' if ready else 'connect')
         self.connect_button.style().unpolish(self.connect_button);self.connect_button.style().polish(self.connect_button)
+    def set_controls_for_exposure(self,*_):
+        if hasattr(self,'worker'):
+            self.set_controls(self.ready)
+            self.persist_settings()
     def show_info(self):
+        if self.connection['meta'].get('backend')=='camera':
+            W.QMessageBox.information(self,'相机校准档案',json.dumps(self.connection['meta']['camera_profile'],ensure_ascii=False,indent=2));return
         d=self.connection;meta=d['meta'];dialog=W.QDialog(self);dialog.setWindowTitle('设备与波长校准');dialog.resize(580,520);layout=W.QVBoxLayout(dialog)
         text=W.QLabel(f"{meta['model']}  ·  SN {meta['serial']}\n固件 {meta['firmware']}  ·  2048 像素\n波长映射：设备标定点之间分段线性插值；两端为外推值。");text.setWordWrap(True);layout.addWidget(text)
         table=W.QTableWidget(len(meta['anchors']),2);table.setHorizontalHeaderLabels(['像素位置','标定波长 / nm']);table.horizontalHeader().setSectionResizeMode(W.QHeaderView.ResizeMode.Stretch);table.setEditTriggers(W.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -241,6 +322,7 @@ class Window(W.QMainWindow):
         self.set_controls(self.ready)
     @QtCore.Slot(bool)
     def on_connection_changed(self,ready):
+        if self._closing:return
         self.connecting=False
         if ready:self.device_present=True
         if not ready:
@@ -253,17 +335,27 @@ class Window(W.QMainWindow):
         self.set_controls(ready)
     @QtCore.Slot(object)
     def on_connected(self,data):
-        self.connection=data;self.device_label.setText(data['meta']['model']);self.serial_label.setText(f"SN {data['meta']['serial']}  ·  {data['meta']['firmware']}");self.set_controls(True)
+        if self._closing:return
+        self.connection=data;self.device_label.setText(data['meta']['model']);self.serial_label.setText(f"{data['meta']['serial']}\n{data['meta']['firmware']}");self.serial_label.setToolTip(data['meta']['serial']);self.set_controls(True)
         self.device_status.setText('模拟数据 · 非实测' if data['demo'] else 'USB 已连接')
         self.profile=None;self.calibration_error=None;self.initial_fit_done=False
-        try:self.profile=profile_for(data['meta'])
+        self.frame_data=None;self.dark=None;self.save_button.setEnabled(False)
+        try:self.profile=None if data['meta'].get('backend')=='camera' else profile_for(data['meta'])
         except (ValueError,KeyError,OSError) as e:self.calibration_error=str(e)
         self.calibration_enabled.setEnabled(self.profile is not None);self.nonlinearity_enabled.setEnabled(self.profile is not None)
         self.calibration_label.setText(('校准档案已匹配 · 暗背景＋非线性' if self.profile else '无匹配档案 · 使用原始计数') if not self.calibration_error else '校准档案无效：'+self.calibration_error)
+        if data['meta'].get('backend')=='camera':
+            self.calibration_enabled.setText('应用波长校准');self.nonlinearity_enabled.setText('使用二次波长校准（关闭为线性）')
+            self.calibration_enabled.setEnabled(bool(self.camera_profile.coefficients))
+            self.nonlinearity_enabled.setEnabled(len(self.camera_profile.coefficients)==3 and len(self.camera_profile.points)>=2)
+            self.calibration_label.setText(self.camera_profile.source+' · 强度未定标')
+        else:
+            self.calibration_enabled.setText('应用设备校正');self.nonlinearity_enabled.setText('非线性修正')
         self.integration_request.emit(self.integration.value())
         if self.args.smoke:self.start(False)
     @QtCore.Slot(str)
     def on_state(self,text):
+        if self._closing:return
         self.auto_busy=text.startswith('自动积分 ·');self.busy=text in ('连续采集中','单次采集中') or self.auto_busy
         if not self.auto_busy:self.continuous=text=='连续采集中'
         self.set_controls(self.ready);self.status.showMessage(text)
@@ -272,6 +364,7 @@ class Window(W.QMainWindow):
         if text=="USB 已断开":self.device_status.setText(text)
     @QtCore.Slot(str)
     def on_error(self,text):
+        if self._closing:return
         self.pending_dark=False;self.connecting=False;self.sampling_indicator.stop();self.last_time=None
         self.device_status.setText('连接异常');self.status.showMessage(text);self.warning_label.setText(text);self.warning_label.show();self.busy=False;self.set_controls(False)
         if self.args.smoke:print(text,file=sys.stderr);self.args.failed=True;self.close()
@@ -280,18 +373,24 @@ class Window(W.QMainWindow):
         self.busy=True;self.set_controls(self.ready);self.start_request.emit(p,self.average.value(),continuous)
     @QtCore.Slot(int)
     def update_integration_label(self,parameter):
-        self.integration_label.setText(f'积分时间 · {parameter}')
+        camera=self.backend_selector.currentIndex()==1
+        if hasattr(self,'camera_exposure') and not self.camera_exposure.hasFocus() and self.camera_exposure.value()!=parameter/10:
+            with QtCore.QSignalBlocker(self.camera_exposure):self.camera_exposure.setValue(parameter/10)
+        self.integration_label.setText(('曝光时间' if camera else '积分时间') if getattr(self,'compact_sidebar',False) else (f'曝光时间 · {parameter/10:.1f} ms' if camera else f'积分时间 · {parameter}'))
     @QtCore.Slot(int)
     def update_integration(self,parameter):
         with QtCore.QSignalBlocker(self.integration):
-            self.integration.setValue(parameter)
-            self.integration.lineEdit().setText(str(self.integration.value()))
+            if self.integration.value()!=parameter and not self.integration.hasFocus():self.integration.setValue(parameter)
         self.update_integration_label(self.integration.value())
+    @QtCore.Slot(int)
+    def update_average(self,average):
+        with QtCore.QSignalBlocker(self.average):self.average.setValue(average)
     @QtCore.Slot(int,str)
     def on_auto(self,p,text):
         self.update_integration(p);self.persist_settings();self.warning_label.setText(text);self.warning_label.setVisible(bool(text))
     @QtCore.Slot(float,int,int)
     def on_capture_started(self,started,parameter,average):
+        if self._closing:return
         context=(parameter,average)
         changed=context!=self.sampling_context
         if changed:self.last_time=None
@@ -300,54 +399,90 @@ class Window(W.QMainWindow):
         if self.sampling_indicator.period is None:self.measure_status.setText('采样中…')
     @QtCore.Slot(object)
     def on_frame(self,frame):
+        if self._closing:return
         self.frame_data=frame;self.save_button.setEnabled(True)
+        if frame.get('backend')=='camera' and 'camera_exposure_ms' in frame:
+            ms=frame['camera_exposure_ms'];auto=frame.get('camera_exposure_mode')=='spectrum-auto'
+            limit=' · 已到最短' if ms<=7.8 else (' · 已到最长' if ms>=1000 else '')
+            self.camera_exposure_status.setText(f"{'自动' if auto else '手动'} · 设定 {ms:.1f} ms"+limit+f" · 峰值 {float(np.max(frame['mean'])):.1f} DN")
+        if self.raw_preview_toggle.isChecked():self.update_raw_preview()
         now=time.monotonic() if self.capture_started_at is None else self.capture_started_at+frame['elapsed']
         period=max(frame['elapsed'],1e-6) if self.last_time is None else max(now-self.last_time,1e-6)
         self.last_time=now;self.sampling_indicator.complete(period)
         rate=f'  ·  {1/period:.1f} Hz' if period<=.2 else ''
         self.measure_status.setText(f"{frame['index']} 帧{rate}  ·  读取 {frame['elapsed']*1000:.1f} ms")
-        self.render()
+        self.render();self.set_controls(self.ready)
         if self.args.smoke and not getattr(self,'smoke_scheduled',False):
             self.smoke_scheduled=True;QtCore.QTimer.singleShot(200,self.finish_smoke)
+    def show_raw_preview(self,enabled):
+        self.raw_preview.setVisible(enabled)
+        if enabled:self.update_raw_preview()
+    def update_raw_preview(self):
+        if self._closing:return
+        f=self.frame_data
+        if f is None or f.get('backend')!='camera' or 'camera_image' not in f:return
+        p=CameraProfile(**f['device'].get('camera_profile',{}))
+        image=f['camera_image'];image=image[:,::-1] if p.flip else image
+        x,y,width,height=p.roi()
+        rgb=np.ascontiguousarray(image[y:y+height,x:x+width,::-1]);h,w=rgb.shape[:2]
+        aligned,left,span=wavelength_aligned_strip(rgb,f['wave'])
+        self.raw_band.setImage(aligned,autoLevels=False)
+        self.raw_band.setRect(QtCore.QRectF(left,0,span,h))
+        self.raw_band_plot.setToolTip('光带按当前波长标定横向映射，与下方谱峰同轴；仅显示插值，不改变原始数据')
+        self.align_raw_band()
+        self.pixel_curve.setData(np.arange(x,x+len(f['mean'])),f['mean'])
+    def align_raw_band(self,*_):
+        # Painting reads the main transform; it never changes geometry or ranges.
+        if not self._closing and hasattr(self,'raw_band_plot') and isValid(self.raw_band_plot):self.raw_band_plot.update()
     def corrected_data(self):
-        f=self.frame_data;y=f['mean'].copy();dark=None
+        f=self.frame_data;y=f['mean'].copy();dark=self.dark['counts'] if f.get('backend')=='camera' and self.dark is not None else None
         self.processing=dict(method='raw' if dark is None else 'manual-dark',nonlinearity=False)
         if self.calibration_enabled.isChecked() and self.profile and self.profile.matches(f['device']):
             y,self.processing=correct_counts(y,self.profile,nonlinear=self.nonlinearity_enabled.isChecked(),manual_dark=dark)
         elif dark is not None:y-=dark
         return y,dark
     def render(self,*_):
+        if self._closing:return
         if self.frame_data is None:return
-        f=self.frame_data;x=f['wave'];y,dark=self.corrected_data();shown=sta_smooth(y,self.smooth.value()) if 'profile_sha256' in self.processing else display_smooth(y,self.smooth.value())
+        f=self.frame_data
+        camera_profile=None
+        if f.get('backend')=='camera' and f.get('device',{}).get('camera_profile',{}):
+            camera_profile=CameraProfile(**f['device']['camera_profile'])
+            active=display_camera_profile(camera_profile,self.calibration_enabled.isChecked(),self.nonlinearity_enabled.isChecked())
+            f['wave'],f['extra']=active.wavelengths()
+            f['wavelength_method']='camera vendor mapping' if not self.calibration_enabled.isChecked() else ('camera quadratic calibration' if len(active.coefficients)==3 else 'camera linear calibration')
+            self.nonlinearity_enabled.setEnabled(self.calibration_enabled.isChecked() and len(camera_profile.coefficients)==3 and len(camera_profile.points)>=2)
+            mode='原始卖家映射' if not self.calibration_enabled.isChecked() else ('二次波长校准' if len(active.coefficients)==3 else '线性波长校准')
+            self.calibration_label.setText(mode+' · '+camera_profile.source+' · 强度未定标')
+            if self.raw_preview_toggle.isChecked():self.update_raw_preview()
+        x=f['wave'];y,dark=self.corrected_data();shown=sta_smooth(y,self.smooth.value()) if 'profile_sha256' in self.processing else display_smooth(y,self.smooth.value())
         self.corrected=y;self.displayed=shown;self.applied_dark=dark
+        if camera_profile is not None:self.processing.update(wavelength_calibration=self.calibration_enabled.isChecked(),quadratic_wavelength=self.nonlinearity_enabled.isChecked())
+        if camera_profile is not None and self.camera_before_overlay.isChecked() and self.calibration_enabled.isChecked():
+            original=display_camera_profile(camera_profile,False).wavelengths()[0]
+            self.camera_before_curve.setData(original,shown)
+        else:self.camera_before_curve.setData([],[])
         self.raw_curve.setData(x,y if self.overlay.isChecked() and self.smooth.value() else np.full_like(y,np.nan))
         index=self.mode.currentIndex()
-        if isinstance(self.curve,GpuSpectrumCurve):self.curve.effect=index
-        style_key=(index,self.theme.currentText(),W.QApplication.instance().styleHints().colorScheme())
-        if getattr(self,'curve_style_key',None)!=style_key:
-            self.curve_style_key=style_key
-            dark=self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark)
-            self.plot.setBackground('#071b16' if index==3 else ('#18212c' if dark else '#ffffff'))
-            if index==3:
-                self.curve.setPen(pg.mkPen('#8affce',width=1.5));self.curve.setFillLevel(None)
-            elif index:
-                gradient=QtGui.QLinearGradient(380,0,780,0)
-                for value,color in [(0,'#9068e9'),(.15,'#6588ff'),(.25,'#48d5ec'),(.375,'#78e59d'),(.5,'#e5e472'),(.625,'#f3aa67'),(.8,'#ed6e75'),(1,'#ae556b')]:gradient.setColorAt(value,QtGui.QColor(color))
-                pen=QtGui.QPen(QtGui.QBrush(gradient),1.8);pen.setCosmetic(True);self.curve.setPen(pen)
-                if index==2:
-                    for stop,color in gradient.stops():color.setAlpha(65);gradient.setColorAt(stop,color)
-                    self.curve.setFillLevel(0);self.curve.setBrush(QtGui.QBrush(gradient))
-                else:self.curve.setFillLevel(None)
-            else:self.curve.setPen(pg.mkPen('#84b9ed' if self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark) else '#245b8f',width=1.8));self.curve.setFillLevel(None)
+        dark=self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark)
+        background='#071b16' if index==3 else ('#18212c' if dark else '#ffffff')
+        if self.plot.backgroundBrush().color().name()!=background:self.plot.setBackground(background)
+        style_spectrum_curve(self.curve,index,'#84b9ed' if dark else '#245b8f')
         self.curve.setData(x,shown)
         self.fit_display()
+        if self.raw_preview_toggle.isChecked():self.align_raw_band()
         if index==3 and not isinstance(self.curve,GpuSpectrumCurve):
             xr,yr=self.spectrum_view.viewRange()
             self.phosphor.update_spectrum(x,shown,(xr[0],xr[1],yr[0],yr[1]))
         elif self.phosphor.isVisible():self.phosphor.reset()
         self.update_cursor_marker()
-        self.peaks=analyze(x,y,self.range_start.value(),self.range_end.value())
-        clipped=bool(np.any((32767-f['adc_frames'].astype(np.int32))[:,10:2041]>=16500))
+        self.peaks=analyze(x,y,self.range_start.value(),self.range_end.value(),minimum_prominence=1 if f.get('backend')=='camera' else 20)
+        camera=f.get('backend')=='camera'
+        unit='DN' if camera else 'counts'
+        self.metric_units[2].setText(unit)
+        self.plot.setLabel('left','Intensity',units=unit)
+        self.table.setHorizontalHeaderLabels(['峰位 / nm',f'强度 / {unit}','FWHM / nm','起点 / nm','终点 / nm',f'峰面积\n{unit}·nm'])
+        clipped=bool(f.get('saturated',False)) if camera else bool(np.any((32767-f['adc_frames'].astype(np.int32))[:,10:2041]>=16500))
         if clipped:
             peak_max=float(np.max(y))
             for p in self.peaks:
@@ -360,12 +495,32 @@ class Window(W.QMainWindow):
         else:
             for label in self.metric_labels:label.setText('—')
             self.halfline.setData([],[])
-        self.table.setRowCount(len(self.peaks))
-        for row,p in enumerate(self.peaks):
-            for col,text in enumerate([f'{p.wavelength:.1f}',f'{p.intensity:.1f}','—' if p.fwhm is None else f'{p.fwhm:.1f}',p.warning or '可分析']):self.table.setItem(row,col,W.QTableWidgetItem(text))
+        starts=[];ends=[]
+        with QtCore.QSignalBlocker(self.table):
+            self.table.setRowCount(len(self.peaks))
+            for row,p in enumerate(self.peaks):
+                p.area=integrate_peak(x,y,p,self.range_start.value(),self.range_end.value())
+                area=p.area
+                quality='；'.join(filter(None,[p.warning,area.warning if area else ''])) or '可分析'
+                texts=[f'{p.wavelength:.1f}',f'{p.intensity:.1f}','—' if p.fwhm is None else f'{p.fwhm:.1f}',
+                       '—' if area is None or area.start is None else f'{area.start:.1f}',
+                       '—' if area is None or area.end is None else f'{area.end:.1f}',
+                       '—' if area is None or area.value is None else f'{area.value:,.1f}']
+                for col,text in enumerate(texts):
+                    item=self.table.item(row,col)
+                    if item is None:item=W.QTableWidgetItem();self.table.setItem(row,col,item)
+                    item.setText(text);item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    item.setToolTip('；'.join(filter(None,[text,quality if quality!='可分析' else '', '自动确定起止点；局部背景扣除后，对未平滑校正数据积分。' if col>=3 else ''])))
+                if area is not None:
+                    if area.start is not None:starts.append(area.start)
+                    if area.end is not None:ends.append(area.end)
+        self.area_starts.setData(starts,np.interp(starts,x,shown));self.area_ends.setData(ends,np.interp(ends,x,shown))
         notes=[]
-        if clipped:notes.insert(0,'⚠ 原始帧接近实测削顶水平')
+        if camera and f.get('camera_exposure_ms') is not None:notes.append(f"曝光 {f['camera_exposure_ms']:.1f} ms")
+        if camera:notes.append('摄像头灰度 DN · 未做光谱响应定标'+(' · 包含校准点范围外的外推' if np.any(f['extra']) else ''))
+        if clipped:notes.insert(0,'⚠ 光带颜色通道饱和；最短曝光仍饱和时请减弱入光' if camera else '⚠ 原始帧接近实测削顶水平')
         if self.range_start.value()>=self.range_end.value():notes.insert(0,'分析起点必须小于终点')
+        self.plot.set_spectrum_series([dict(name='摄像头' if camera else 'FLA5000',x=x,y=shown,peaks=self.peaks,unit=unit,color='#b98c40')])
         self.warning_label.setText('  ·  '.join(notes));self.warning_label.setVisible(bool(notes))
     def update_navigation(self,*args):
         low,high=self.spectrum_view.viewRange()[0]
@@ -379,9 +534,11 @@ class Window(W.QMainWindow):
         mask=(x>=low)&(x<=high)&np.isfinite(y)
         if not np.any(mask):
             self.navigation_label.setText('所选范围内没有采样点');return
-        values=y[mask];bottom=min(0.,float(values.min()));top=max(bottom+200.,float(values.max()))
+        values=y[mask];bottom=min(0.,float(values.min()))
+        minimum_span=5. if self.frame_data.get('backend')=='camera' else 200.
+        top=max(bottom+minimum_span,float(values.max()))
         # A display-only floor keeps dark noise from filling the entire plot.
-        context=(low,high,self.frame_data['parameter'],self.smooth.value(),self.processing.get('method'),self.processing.get('nonlinearity'))
+        context=(self.frame_data.get('backend','fla5000'),low,high,self.frame_data['parameter'],self.smooth.value(),self.processing.get('method'),self.processing.get('nonlinearity'))
         now=time.monotonic();desired=(bottom-max(1.,(top-bottom)*.05),top+max(1.,(top-bottom)*.05))
         if getattr(self,'axis_context',None)!=context:
             self.axis_context=context;self.axis_limits=desired;self.axis_shrink_since=None
@@ -393,16 +550,17 @@ class Window(W.QMainWindow):
                 if self.axis_shrink_since is None:self.axis_shrink_since=now
                 elif now-self.axis_shrink_since>=2:self.axis_limits=desired;self.axis_shrink_since=None
             else:self.axis_shrink_since=None
-        self.plot.setXRange(low,high,padding=0);self.plot.setYRange(*self.axis_limits,padding=0)
+        self.plot.set_display_range(low,high);self.plot.setYRange(*self.axis_limits,padding=0)
         self.update_navigation()
     def reset_plot(self):
+        self.plot.reset_navigation()
         if self.frame_data is not None:
             x=self.frame_data['wave']
             for box,value in ((self.display_start,float(x.min())),(self.display_end,float(x.max()))):
                 box.blockSignals(True);box.setValue(value);box.blockSignals(False)
             self.fit_display()
     def clear_cursor_marker(self):
-        self.cursor_wave=None;self.cursor_marker.hide()
+        self.cursor_wave=None;self.cursor_marker.hide();self.raw_band_plot.update()
         self.cursor_label.setText('移动鼠标查看波长与强度')
     def update_cursor_marker(self):
         if self.cursor_wave is None or self.frame_data is None:return
@@ -412,8 +570,13 @@ class Window(W.QMainWindow):
         intensity=float(np.interp(self.cursor_wave,wave,self.displayed))
         if not np.isfinite(intensity):
             self.clear_cursor_marker();return
-        self.cursor_marker.setData([self.cursor_wave],[intensity]);self.cursor_marker.show()
-        self.cursor_label.setText(f'{self.cursor_wave:.1f} nm  ·  {intensity:.1f} counts')
+        self.cursor_marker.setData([self.cursor_wave],[intensity]);self.cursor_marker.show();self.raw_band_plot.update()
+        unit='DN' if self.frame_data.get('backend')=='camera' else 'counts'
+        self.cursor_label.setText(f'{self.cursor_wave:.1f} nm  ·  {intensity:.1f} {unit}')
+    def shared_cursor_moved(self,wave):
+        if self._closing:return
+        if wave is None:self.clear_cursor_marker()
+        else:self.cursor_wave=wave;self.update_cursor_marker()
     def mouse_moved(self,pos):
         if self.frame_data is None or not self.spectrum_view.sceneBoundingRect().contains(pos):
             self.clear_cursor_marker();return
@@ -424,41 +587,46 @@ class Window(W.QMainWindow):
         return super().eventFilter(watched,event)
     def request_auto(self):
         if not self.ready or getattr(self,'auto_busy',False):return
-        self.auto_busy=True;self.busy=True;self.set_controls(True);self.auto_request.emit()
+        self.auto_busy=True;self.busy=True;self.set_controls(True);self.average_request.emit(self.average.value());self.auto_request.emit()
     def toggle_acquisition(self):
         if getattr(self,'auto_busy',False):
             self.run.setEnabled(False);self.stop_request.emit();return
         if getattr(self,'continuous',False):self.stop_request.emit()
         else:self.start(True)
+    def settings_store(self):
+        store=QtCore.QSettings('SpectraDesk','SpectraDesk')
+        if getattr(self.args,'backend',None)=='camera':store.beginGroup('camera')
+        return store
     def persist_settings(self,*_):
         if getattr(self,'restoring',False):return
-        store=QtCore.QSettings('SpectraDesk','SpectraDesk')
+        store=self.settings_store()
         for name in ('integration','average','smooth','display_start','display_end','range_start','range_end'):store.setValue(name,getattr(self,name).value())
         for name in ('mode','theme'):store.setValue(name,getattr(self,name).currentIndex())
-        for name in ('overlay','calibration_enabled','nonlinearity_enabled'):store.setValue(name,getattr(self,name).isChecked())
+        for name in ('overlay','calibration_enabled','nonlinearity_enabled','camera_exposure_auto','raw_preview_toggle'):store.setValue(name,getattr(self,name).isChecked())
         store.sync()
     def restore_settings(self):
-        self.restoring=True;store=QtCore.QSettings('SpectraDesk','SpectraDesk')
+        self.restoring=True;store=self.settings_store()
         for name in ('integration','average','smooth','display_start','display_end','range_start','range_end'):
             box=getattr(self,name)
             if store.contains(name):box.setValue(float(store.value(name)) if isinstance(box,W.QDoubleSpinBox) else int(store.value(name)))
             box.valueChanged.connect(self.persist_settings)
         for name in ('mode','theme'):
             box=getattr(self,name);box.setCurrentIndex(int(store.value(name,0)));box.currentIndexChanged.connect(self.persist_settings)
-        for name in ('overlay','calibration_enabled','nonlinearity_enabled'):
-            box=getattr(self,name);box.setChecked(store.value(name,True,type=bool));box.toggled.connect(self.persist_settings)
+        for name in ('overlay','calibration_enabled','nonlinearity_enabled','camera_exposure_auto','raw_preview_toggle'):
+            box=getattr(self,name);box.setChecked(store.value(name,getattr(self.args,'backend','')=='camera' if name=='raw_preview_toggle' else True,type=bool));box.toggled.connect(self.persist_settings)
         geometry=store.value('window/geometry',QtCore.QByteArray())
         if isinstance(geometry,QtCore.QByteArray) and not geometry.isEmpty():self.restoreGeometry(geometry)
         self.restoring=False;self.change_theme()
         W.QApplication.instance().styleHints().colorSchemeChanged.connect(lambda *_:self.change_theme())
     def change_theme(self,*_):
+        if self._closing:return
         if not hasattr(self,'plot'):return
         dark=apply_theme(W.QApplication.instance(),self.theme.currentText());self.plot.setBackground('#18212c' if dark else '#ffffff')
         self.cursor_marker.setPen(pg.mkPen('#ffffff' if dark else '#805615',width=1.5))
         for name in ('left','bottom'):
             axis=self.plot.getAxis(name);axis.setPen('#aebfd0' if dark else '#526477');axis.setTextPen('#aebfd0' if dark else '#526477')
         self.render()
-    def settings(self):return dict(calibration=self.processing,calibration_profile=self.profile.data if 'profile_sha256' in self.processing else None,smoothing='STA display-only',smooth_count=self.smooth.value(),plot_mode=self.mode.currentText(),analysis_range_nm=[self.range_start.value(),self.range_end.value()],fwhm_baseline='10th percentile of full spectrum',integration_mode="STA integer parameter",display_range_nm=[self.display_start.value(),self.display_end.value()],dark_metadata=None if self.applied_dark is None else {k:v for k,v in self.dark.items() if k!='counts'})
+    def settings(self):return dict(calibration=self.processing,calibration_profile=self.profile.data if 'profile_sha256' in self.processing else None,smoothing='STA display-only',smooth_count=self.smooth.value(),plot_mode=self.mode.currentText(),analysis_range_nm=[self.range_start.value(),self.range_end.value()],fwhm_baseline='10th percentile of full spectrum',integration_mode="camera driver settings" if self.frame_data.get("backend")=="camera" else "STA integer parameter",display_range_nm=[self.display_start.value(),self.display_end.value()],dark_metadata=None if self.applied_dark is None else {k:v for k,v in self.dark.items() if k!='counts'})
     def create_save_dialog(self):
         dialog=W.QFileDialog(self,'保存测量')
         dialog.setOption(W.QFileDialog.Option.DontUseNativeDialog,True)
@@ -486,13 +654,18 @@ class Window(W.QMainWindow):
         screenshot=self.grab()
         if gpu_image is not None and not gpu_image.isNull():
             painter=QtGui.QPainter(screenshot);painter.drawImage(self.plot.viewport().mapTo(self,QtCore.QPoint(0,0)),gpu_image);painter.end()
-        screenshot.save(str(path/'screenshot.png'));print(json.dumps(dict(device=self.frame_data['device'],peaks=[p.__dict__ for p in self.peaks],pixels=len(self.frame_data['wave'])),ensure_ascii=False),flush=True);self.close()
+        screenshot.save(str(path/'screenshot.png'));print(json.dumps(dict(device=self.frame_data['device'],peaks=[asdict(p) for p in self.peaks],pixels=len(self.frame_data['wave'])),ensure_ascii=False),flush=True);self.close()
     def smoke_timeout(self):
         if not getattr(self.args,'finished',False):self.args.failed=True;print('Smoke timeout',file=sys.stderr);self.close()
     def closeEvent(self,event):
+        if self._closing:event.accept();return
+        self._closing=True
+        self._startup_timer.stop()
+        self.spectrum_view.sigResized.disconnect(self.align_raw_band)
+        self.spectrum_view.sigRangeChanged.disconnect(self.align_raw_band)
         self.sampling_indicator.stop()
         self.persist_settings()
-        store=QtCore.QSettings('SpectraDesk','SpectraDesk');store.setValue('window/geometry',self.saveGeometry());store.sync()
+        store=self.settings_store();store.setValue('window/geometry',self.saveGeometry());store.sync()
         self.thread.requestInterruption()
         if self.thread.isRunning():
             QtCore.QMetaObject.invokeMethod(self.worker,'disconnect_device',QtCore.Qt.ConnectionType.BlockingQueuedConnection)
@@ -507,5 +680,6 @@ def main():
         print('SpectraDesk 已在运行，或无法取得运行锁。',file=sys.stderr);return 1
     apply_theme(app)
     app.setQuitOnLastWindowClosed(False)
-    win=Window(args);win.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose);win.destroyed.connect(app.quit);win.show();app.exec();return 1 if getattr(args,'failed',False) else 0
+    from .workbench import Workbench
+    win=Window(args) if args.smoke else Workbench(args);win.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose);win.destroyed.connect(app.quit);win.show();app.exec();return 1 if getattr(args,'failed',False) else 0
 if __name__=='__main__':sys.exit(main())

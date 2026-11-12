@@ -22,8 +22,8 @@ class FakeDriver:
     def close(self):self.closed=True
 
 
-def run_auto(app,driver,hook=None):
-    worker=Acquisition();worker.ready=True;worker.driver=driver
+def run_auto(app,driver,hook=None,average=1):
+    worker=Acquisition();worker.ready=True;worker.driver=driver;worker.average=average
     worker.timer=QTimer(worker);worker.running=True
     messages=[];states=[];errors=[]
     worker.auto_done.connect(lambda p,m:messages.append((p,m)))
@@ -98,3 +98,40 @@ def test_auto_clamps_high_manual_parameter_before_first_capture():
     assert next(steps)==(1,1,30000)
     assert driver.parameter==30000
     steps.close()
+
+
+@pytest.mark.parametrize('seconds,current,expected',[
+    (1.1,8,1),(.2,8,1),(.1,4,4),(.05,1,1),(.015,1,4),(.005,2,8),(.01,8,8),(.125,8,8)
+])
+def test_auto_average_rate_policy(seconds,current,expected):
+    from spectradesk.worker import choose_auto_average
+    assert choose_auto_average(seconds,current)==expected
+
+
+@pytest.mark.parametrize('seconds,current,expected',[(.2,8,1),(.015,1,4),(.005,2,8)])
+def test_auto_uses_final_frame_timing_and_updates_average(app,monkeypatch,seconds,current,expected):
+    clock=[100.]
+    monkeypatch.setattr(time,'monotonic',lambda:clock[0])
+    driver=FakeDriver()
+    original=driver.capture
+    def capture(n):
+        # Early search rounds are deliberately slower, and must be ignored.
+        clock[0]+=seconds if abs(driver.parameter-101)<=1 else .7
+        return original(n)
+    driver.capture=capture
+    worker,messages,_=run_auto(app,driver,average=current)
+    assert worker.average==expected
+    assert f'平均 {expected} 帧' in messages[0][1]
+
+
+def test_cancel_preserves_average(app):
+    def cancel(worker,text):
+        if '1/3 帧' in text:QTimer.singleShot(0,worker.stop)
+    worker,_,_=run_auto(app,FakeDriver(),cancel,average=6)
+    assert worker.average==6
+
+
+def test_worker_average_limit():
+    worker=Acquisition()
+    worker.set_average(64);assert worker.average==8
+    worker.set_average(0);assert worker.average==1

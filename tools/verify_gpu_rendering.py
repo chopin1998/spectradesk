@@ -15,6 +15,12 @@ if api=='es':
 app=W.QApplication([])
 win=Window(Namespace(demo=True,connect=False,smoke=None))
 win.show();QtTest.QTest.qWait(200)
+# Startup connects asynchronously and clears stale frame_data on completion.
+# Do not inject shader fixtures until that transition has completed.
+for _ in range(250):
+    if win.ready:break
+    QtTest.QTest.qWait(20)
+assert win.ready,'Simulated device startup timed out'
 assert win.plot.viewport().context().isOpenGLES()==(api=='es'),'Requested GL API was not created'
 x=np.linspace(279,975,2048);y=np.full(2048,5000.)
 frame=dict(wave=x,mean=y,extra=np.zeros(2048),adc_frames=np.full((2,2048),30000,dtype=np.uint16),parameter=3000,average=2,demo=True,device=dict(serial='test'),index=1,elapsed=.04)
@@ -38,6 +44,9 @@ try:
     images=[];win.frame_data=frame
     for mode in range(4):
         win.mode.setCurrentIndex(mode);win.render();QtTest.QTest.qWait(50)
+        # Pin the synthetic fixture after processing queued startup/UI signals.
+        win.frame_data=frame;win.mode.setCurrentIndex(mode);win.render()
+        assert win.curve.effect==mode,(mode,win.mode.currentIndex(),win.curve.effect)
         assert not win.curve.last_error,win.curve.last_error
         pixels=capture();images.append(pixels)
         assert np.count_nonzero(pixels[:,:,3])>100
@@ -46,7 +55,7 @@ try:
     visible=win.curve.capture_viewport(win.plot.viewport())
     assert not visible.isNull()
     colored=images[1][images[1][:,:,3]>100][:,:3]
-    assert len(np.unique(colored,axis=0))>32,'Rainbow shader produced a single color'
+    assert len(np.unique(colored,axis=0))>32,f'Rainbow colors={np.unique(colored,axis=0)[:10]} count={len(colored)} effect={win.curve.effect} range={win.spectrum_view.viewRange()}'
     stops=np.array([0,.15,.25,.375,.5,.625,.8,1.])
     colors=np.array([[144,104,233],[101,136,255],[72,213,236],[120,229,157],[229,228,114],[243,170,103],[237,110,117],[174,85,107]])
     for wave in (400.,546.,650.,750.):

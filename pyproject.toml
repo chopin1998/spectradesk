@@ -3,7 +3,7 @@ name = "spectradesk"
 version = "0.1.0"
 description = "Native Linux spectroscopy workbench"
 requires-python = ">=3.12"
-dependencies = ["pyside6>=6.8,<7", "pyqtgraph>=0.13.7,<0.15", "numpy>=2,<3", "scipy>=1.14,<2"]
+dependencies = ["pyside6>=6.8,<7", "pyqtgraph>=0.13.7,<0.15", "numpy>=2,<3", "opencv-python-headless>=4.10,<5", "scipy>=1.14,<2"]
 
 [dependency-groups]
 dev = ["pytest>=8,<10"]
