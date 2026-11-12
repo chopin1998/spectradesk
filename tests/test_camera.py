@@ -180,3 +180,57 @@ def test_wavelength_calibration_comparison_modes():
 def test_auto_exposure_respects_frame_interval_cap():
     from spectradesk.camera import CameraDriver
     assert CameraDriver.auto_exposure_value(300,30,333)==333
+
+
+def test_legacy_camera_profile_defaults_to_fixed_white_balance(tmp_path):
+    path=tmp_path/'legacy.json';path.write_text(json.dumps({'width':32,'height':32}))
+    profile=CameraProfile.load(path)
+    assert profile.white_balance_temperature==4600
+    profile.white_balance_temperature=5000;profile.save(path)
+    assert CameraProfile.load(path).white_balance_temperature==5000
+    with pytest.raises(ValueError,match='白平衡'):CameraProfile(white_balance_temperature=0).validate()
+
+
+@pytest.mark.parametrize('failure',[None,'unsupported-auto','auto-readback','temperature-readback','auto-reenabled','settling-frame'])
+def test_camera_open_fixes_white_balance_after_stream_start(monkeypatch,failure):
+    import cv2
+    from spectradesk.camera import CameraDriver
+    class Capture:
+        def __init__(self):
+            self.values={cv2.CAP_PROP_AUTO_WB:1,cv2.CAP_PROP_WB_TEMPERATURE:6500,cv2.CAP_PROP_FPS:30}
+            self.started=False;self.closed=False;self.frames=0;self.events=[]
+        def isOpened(self):return True
+        def set(self,key,value):
+            if key in (cv2.CAP_PROP_AUTO_WB,cv2.CAP_PROP_WB_TEMPERATURE):
+                assert self.started
+                self.events.append((key,value))
+            if key==cv2.CAP_PROP_AUTO_WB and failure=='unsupported-auto':return False
+            self.values[key]=value
+            if key==cv2.CAP_PROP_AUTO_WB and failure=='auto-readback':self.values[key]=1
+            if key==cv2.CAP_PROP_WB_TEMPERATURE:
+                if failure=='temperature-readback':self.values[key]=6500
+                if failure=='auto-reenabled':self.values[cv2.CAP_PROP_AUTO_WB]=1
+            return True
+        def get(self,key):return self.values.get(key,0)
+        def read(self):
+            if not self.started:
+                self.started=True;self.values[cv2.CAP_PROP_AUTO_WB]=1
+            self.frames+=1
+            if failure=='settling-frame' and self.frames>1:return False,None
+            return True,np.full((16,16,3),self.frames,dtype=np.uint8)
+        def release(self):self.closed=True
+    cap=Capture();monkeypatch.setattr(cv2,'VideoCapture',lambda *_:cap)
+    driver=CameraDriver('/dev/test',CameraProfile(width=16,height=16))
+    if failure is not None:
+        with pytest.raises(RuntimeError,match='白平衡'):driver.open()
+        assert cap.closed and driver.cap is None
+        return
+    meta,_,_=driver.open()
+    assert meta['camera_white_balance']=={'auto':False,'temperature_kelvin':4600}
+    assert meta['camera_profile']['white_balance_temperature']==4600
+    assert cap.events==[(cv2.CAP_PROP_AUTO_WB,0),(cv2.CAP_PROP_WB_TEMPERATURE,4600)]
+    assert cap.frames==9 and np.all(driver.image==9)
+    driver.set_exposure_auto(False);driver.set_parameter(100);driver.capture(2)
+    assert cap.values[cv2.CAP_PROP_AUTO_WB]==0 and cap.values[cv2.CAP_PROP_WB_TEMPERATURE]==4600
+    assert len(cap.events)==2
+    driver.close()

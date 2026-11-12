@@ -16,7 +16,6 @@ class SpectrumPlot(pg.PlotWidget):
         self.scene().sigMouseMoved.connect(self.hover_spectrum)
         self.getViewBox().sigRangeChanged.connect(lambda *_:self.position_readout())
         self.useOpenGL(renderer=='opengl')
-        self.setToolTip('滚轮缩放波长 · 左键拖动 · 双击恢复完整范围')
         self.getAxis('bottom').enableAutoSIPrefix(False)
     def set_display_range(self,low,high,force=False):
         view=self.getViewBox();requested=(float(low),float(high))

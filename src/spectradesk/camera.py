@@ -20,6 +20,7 @@ class CameraProfile:
     points: list = field(default_factory=list)
     source: str = '卖家 Theremino v3.1 参数 · 待实测验证'
     device: str = ''
+    white_balance_temperature: int = 4600
 
     def validate(self):
         if not (16 <= self.width <= 8192 and 16 <= self.height <= 8192 and 1 <= self.fps <= 120):
@@ -27,6 +28,8 @@ class CameraProfile:
         if not (0 <= self.start_x < self.end_x <= 1000 and 1 <= self.size_y <= 100 and 0 <= self.start_y <= 100-self.size_y):
             raise ValueError('取样区域无效：横向为千分比，纵向为百分比')
         if not (0 < self.minimum < self.maximum < 10000):raise ValueError('波长范围无效')
+        if not isinstance(self.white_balance_temperature,int) or isinstance(self.white_balance_temperature,bool) or not 1000<=self.white_balance_temperature<=20000:
+            raise ValueError('固定白平衡色温无效')
         if self.coefficients:
             if len(self.coefficients) not in (2,3) or not np.isfinite(self.coefficients).all():raise ValueError('校准系数无效')
             x=np.arange(self.width);w=np.polyval(self.coefficients,x)
@@ -123,6 +126,7 @@ class CameraDriver:
     def open(self):
         import cv2
         self.cv2=cv2
+        self.profile.validate()
         if self.profile.device and self.profile.device!=self.path:raise ValueError('校准档案属于另一台相机；请重新选择相机并校准')
         self.cap=cv2.VideoCapture(self.path,cv2.CAP_V4L2)
         if not self.cap.isOpened():self.close();raise RuntimeError('无法打开相机；请先在 VirtualBox 中释放 Web Camera')
@@ -132,13 +136,37 @@ class CameraDriver:
         # controls only after that transition, otherwise UVC may restore auto.
         ok,image=self.cap.read()
         if not ok:self.close();raise RuntimeError('相机启动取流失败')
+        try:
+            white_balance=self._configure_white_balance()
+            # Discard frames queued before the ISP applied the fixed channel gains.
+            for _ in range(8):
+                ok,image=self.cap.read()
+                if not ok:raise RuntimeError('相机白平衡设置后取流失败')
+        except Exception:
+            self.close();raise
         self.image=image.copy()
         reported_fps=float(self.cap.get(cv2.CAP_PROP_FPS))
         self.stream_fps=reported_fps if np.isfinite(reported_fps) and reported_fps>0 else self.profile.fps
         self.exposure_max=max(78,min(10000,int(10000/self.stream_fps)))
         self.wave,self.extra=self.profile.wavelengths()
-        self.meta=dict(model='Camera · Theremino',serial=self.path,firmware='V4L2 / MJPG',backend='camera',camera_profile=asdict(self.profile),camera_fps=self.stream_fps,camera_exposure_max=self.exposure_max)
+        self.meta=dict(model='Camera · Theremino',serial=self.path,firmware='V4L2 / MJPG',backend='camera',camera_profile=asdict(self.profile),camera_fps=self.stream_fps,camera_exposure_max=self.exposure_max,camera_white_balance=white_balance)
         return self.meta,self.wave,self.extra
+    def _configure_white_balance(self):
+        cv2=self.cv2;temperature=self.profile.white_balance_temperature
+        if not self.cap.set(cv2.CAP_PROP_AUTO_WB,0):
+            raise RuntimeError('相机不支持关闭自动白平衡，无法保持校准与采集参数一致')
+        auto=float(self.cap.get(cv2.CAP_PROP_AUTO_WB))
+        if not np.isfinite(auto) or auto!=0:
+            raise RuntimeError('关闭相机自动白平衡未生效')
+        if not self.cap.set(cv2.CAP_PROP_WB_TEMPERATURE,temperature):
+            raise RuntimeError(f'相机不支持固定白平衡色温 {temperature} K')
+        actual=float(self.cap.get(cv2.CAP_PROP_WB_TEMPERATURE))
+        auto=float(self.cap.get(cv2.CAP_PROP_AUTO_WB))
+        if not np.isfinite(actual) or abs(actual-temperature)>1:
+            raise RuntimeError(f'相机白平衡色温设置未生效：请求 {temperature} K，实际 {actual} K')
+        if not np.isfinite(auto) or auto!=0:
+            raise RuntimeError('设置色温后相机自动白平衡重新启用')
+        return dict(auto=False,temperature_kelvin=int(round(actual)))
     def capture(self,average):
         frames=[];self.saturated=False
         if self._exposure_changed:
