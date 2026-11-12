@@ -16,7 +16,7 @@ from .plot_view import SpectrumViewBox
 from .sampling_indicator import SamplingIndicator
 from .phosphor import PhosphorImage
 from .gpu_curve import GpuSpectrumCurve
-from .analysis import analyze,display_smooth,integrate_peak
+from .analysis import analyze,display_smooth,integrate_peak,prepare_integration_context
 from .storage import save_measurement
 from .calibration import profile_for, correct_counts, sta_smooth
 
@@ -268,13 +268,18 @@ class Window(W.QMainWindow):
     def set_controls(self,ready):
         if self._closing:return
         self.ready=ready
-        self.device_status.setProperty("connected",ready);self.device_status.style().unpolish(self.device_status);self.device_status.style().polish(self.device_status)
+        if self.device_status.property("connected")!=ready:
+            self.device_status.setProperty("connected",ready);self.device_status.style().unpolish(self.device_status);self.device_status.style().polish(self.device_status)
         self.info_button.setEnabled(ready)
         self.single.setEnabled(ready and not self.busy)
         self.auto_button.setEnabled(ready and not getattr(self,'auto_busy',False))
         self.run.setEnabled(ready)
         self.connect_button.setEnabled((ready or self.device_present) and not self.connecting and not getattr(self,'auto_busy',False))
-        running=getattr(self,'continuous',False) or getattr(self,'auto_busy',False);self.run.setText('取消自动积分' if getattr(self,'auto_busy',False) else ('停止采集' if running else '连续采集'));self.run.setObjectName('running' if running else 'primary');self.run.style().unpolish(self.run);self.run.style().polish(self.run)
+        running=getattr(self,'continuous',False) or getattr(self,'auto_busy',False);run_text='取消自动积分' if getattr(self,'auto_busy',False) else ('停止采集' if running else '连续采集')
+        if self.run.text()!=run_text:self.run.setText(run_text)
+        run_obj='running' if running else 'primary'
+        if self.run.objectName()!=run_obj:
+            self.run.setObjectName(run_obj);self.run.style().unpolish(self.run);self.run.style().polish(self.run)
         camera=self.backend_selector.currentIndex()==1
         self.backend_selector.setEnabled(not ready and not self.connecting)
         self.camera_dark.setVisible(camera);self.camera_dark.setEnabled(ready and self.frame_data is not None);self.camera_button.setVisible(camera);self.camera_button.setEnabled(not ready and not self.connecting)
@@ -288,9 +293,12 @@ class Window(W.QMainWindow):
         self.integration.setVisible(not camera);self.camera_exposure.setVisible(camera and not self.camera_exposure_auto.isChecked());self.integration_label.setVisible(not camera or not self.camera_exposure_auto.isChecked());self.auto_button.setVisible(not camera)
         self.integration.setEnabled(not getattr(self,'auto_busy',False))
         self.average.setEnabled(not getattr(self,'auto_busy',False))
-        self.connect_button.setText('断开设备' if ready else '连接光谱仪')
-        self.connect_button.setObjectName('disconnect' if ready else 'connect')
-        self.connect_button.style().unpolish(self.connect_button);self.connect_button.style().polish(self.connect_button)
+        conn_text='断开设备' if ready else '连接光谱仪'
+        if self.connect_button.text()!=conn_text:self.connect_button.setText(conn_text)
+        conn_obj='disconnect' if ready else 'connect'
+        if self.connect_button.objectName()!=conn_obj:
+            self.connect_button.setObjectName(conn_obj)
+            self.connect_button.style().unpolish(self.connect_button);self.connect_button.style().polish(self.connect_button)
     def set_controls_for_exposure(self,*_):
         if hasattr(self,'worker'):
             self.set_controls(self.ready)
@@ -461,8 +469,12 @@ class Window(W.QMainWindow):
         if camera_profile is not None and self.camera_before_overlay.isChecked() and self.calibration_enabled.isChecked():
             original=display_camera_profile(camera_profile,False).wavelengths()[0]
             self.camera_before_curve.setData(original,shown)
-        else:self.camera_before_curve.setData([],[])
-        self.raw_curve.setData(x,y if self.overlay.isChecked() and self.smooth.value() else np.full_like(y,np.nan))
+        elif self.camera_before_curve.xData is not None and len(self.camera_before_curve.xData):
+            self.camera_before_curve.setData([],[])
+        if self.overlay.isChecked() and self.smooth.value():
+            self.raw_curve.setData(x,y)
+        elif self.raw_curve.xData is not None and len(self.raw_curve.xData):
+            self.raw_curve.setData([],[])
         index=self.mode.currentIndex()
         dark=self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark)
         background='#071b16' if index==3 else ('#18212c' if dark else '#ffffff')
@@ -479,9 +491,10 @@ class Window(W.QMainWindow):
         self.peaks=analyze(x,y,self.range_start.value(),self.range_end.value(),minimum_prominence=1 if f.get('backend')=='camera' else 20)
         camera=f.get('backend')=='camera'
         unit='DN' if camera else 'counts'
-        self.metric_units[2].setText(unit)
-        self.plot.setLabel('left','Intensity',units=unit)
-        self.table.setHorizontalHeaderLabels(['峰位 / nm',f'强度 / {unit}','FWHM / nm','起点 / nm','终点 / nm',f'峰面积\n{unit}·nm'])
+        if self.metric_units[2].text()!=unit:
+            self.metric_units[2].setText(unit)
+            self.plot.setLabel('left','Intensity',units=unit)
+            self.table.setHorizontalHeaderLabels(['峰位 / nm',f'强度 / {unit}','FWHM / nm','起点 / nm','终点 / nm',f'峰面积\n{unit}·nm'])
         clipped=bool(f.get('saturated',False)) if camera else bool(np.any((32767-f['adc_frames'].astype(np.int32))[:,10:2041]>=16500))
         if clipped:
             peak_max=float(np.max(y))
@@ -489,17 +502,22 @@ class Window(W.QMainWindow):
                 if p.intensity>=.85*peak_max:p.fwhm=None;p.warning='原始帧可能削顶，半高宽无效'
         self.markers.setData([p.wavelength for p in self.peaks],[p.intensity for p in self.peaks])
         if self.peaks:
-            p=self.peaks[0];self.metric_labels[0].setText(f'{p.wavelength:.1f}');self.metric_labels[1].setText('—' if p.fwhm is None else f'{p.fwhm:.1f}');self.metric_labels[2].setText(f'{p.intensity:,.0f}')
+            p=self.peaks[0]
+            for lbl,txt in zip(self.metric_labels,(f'{p.wavelength:.1f}','—' if p.fwhm is None else f'{p.fwhm:.1f}',f'{p.intensity:,.0f}')):
+                if lbl.text()!=txt:lbl.setText(txt)
             if p.fwhm is not None:self.halfline.setData([p.left,p.right],[p.baseline+(p.intensity-p.baseline)/2]*2)
-            else:self.halfline.setData([],[])
+            elif self.halfline.xData is not None and len(self.halfline.xData):self.halfline.setData([],[])
         else:
-            for label in self.metric_labels:label.setText('—')
-            self.halfline.setData([],[])
+            for label in self.metric_labels:
+                if label.text()!='—':label.setText('—')
+            if self.halfline.xData is not None and len(self.halfline.xData):self.halfline.setData([],[])
         starts=[];ends=[]
+        r_start=self.range_start.value();r_end=self.range_end.value()
+        integ_ctx=prepare_integration_context(x,y,r_start,r_end) if self.peaks else None
         with QtCore.QSignalBlocker(self.table):
-            self.table.setRowCount(len(self.peaks))
+            if self.table.rowCount()!=len(self.peaks):self.table.setRowCount(len(self.peaks))
             for row,p in enumerate(self.peaks):
-                p.area=integrate_peak(x,y,p,self.range_start.value(),self.range_end.value())
+                p.area=integrate_peak(x,y,p,r_start,r_end,_context=integ_ctx)
                 area=p.area
                 texts=[f'{p.wavelength:.1f}',f'{p.intensity:.1f}','—' if p.fwhm is None else f'{p.fwhm:.1f}',
                        '—' if area is None or area.start is None else f'{area.start:.1f}',
@@ -507,12 +525,14 @@ class Window(W.QMainWindow):
                        '—' if area is None or area.value is None else f'{area.value:,.1f}']
                 for col,text in enumerate(texts):
                     item=self.table.item(row,col)
-                    if item is None:item=W.QTableWidgetItem();self.table.setItem(row,col,item)
-                    item.setText(text);item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    if item is None:
+                        item=W.QTableWidgetItem(text);item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter);self.table.setItem(row,col,item)
+                    elif item.text()!=text:item.setText(text)
                 if area is not None:
                     if area.start is not None:starts.append(area.start)
                     if area.end is not None:ends.append(area.end)
-        self.area_starts.setData(starts,np.interp(starts,x,shown));self.area_ends.setData(ends,np.interp(ends,x,shown))
+        self.area_starts.setData(starts,np.interp(starts,x,shown) if starts else [])
+        self.area_ends.setData(ends,np.interp(ends,x,shown) if ends else [])
         notes=[]
         if camera and f.get('camera_exposure_ms') is not None:notes.append(f"曝光 {f['camera_exposure_ms']:.1f} ms")
         if camera:notes.append('摄像头灰度 DN · 未做光谱响应定标'+(' · 包含校准点范围外的外推' if np.any(f['extra']) else ''))

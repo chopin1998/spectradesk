@@ -37,16 +37,24 @@ class SpectrumPlot(pg.PlotWidget):
                     for item in [state['cursor'],state['peaks']]+state['labels']:state['view'].removeItem(item)
                 cursor=pg.ScatterPlotItem(size=10,brush='#ffe066',pen=pg.mkPen('#805615'));peaks=pg.ScatterPlotItem(size=6,brush=spec.get('color','#bd873c'),pen=None)
                 for item in (cursor,peaks):item.setZValue(40);view.addItem(item,ignoreBounds=True)
-                state=dict(view=view,cursor=cursor,peaks=peaks,labels=[]);self._series[name]=state
+                state=dict(view=view,cursor=cursor,peaks=peaks,labels=[],peak_key=None);self._series[name]=state
             state['spec']=spec;visible=spec.get('visible',True)
             x=np.asarray(spec['x']);y=np.asarray(spec['y']);positions=np.asarray([p.wavelength for p in spec.get('peaks',[])],dtype=float)
             heights=np.interp(positions,x,y) if x.size else np.array([])
-            state['peaks'].setData(positions,heights);state['peaks'].setVisible(visible)
-            while len(state['labels'])<min(8,len(positions)):
-                text=pg.TextItem(anchor=(.5,1),color=spec.get('color','#bd873c'));text.setZValue(45);view.addItem(text,ignoreBounds=True);state['labels'].append(text)
-            for i,label in enumerate(state['labels']):
-                label.setVisible(visible and i<len(positions))
-                if i<len(positions):label.setText(f'{positions[i]:.1f}');label.setPos(positions[i],heights[i])
+            peak_key=(visible,tuple(np.round(positions,2)),tuple(np.round(heights,2)))
+            if state.get('peak_key')!=peak_key:
+                state['peak_key']=peak_key
+                state['peaks'].setData(positions,heights);state['peaks'].setVisible(visible)
+                while len(state['labels'])<min(8,len(positions)):
+                    text=pg.TextItem(anchor=(.5,1),color=spec.get('color','#bd873c'));text.setZValue(45);view.addItem(text,ignoreBounds=True);state['labels'].append(text)
+                for i,label in enumerate(state['labels']):
+                    vis=visible and i<len(positions)
+                    if label.isVisible()!=vis:label.setVisible(vis)
+                    if i<len(positions):
+                        lbl_txt=f'{positions[i]:.1f}'
+                        if getattr(label,'_last_text',None)!=lbl_txt:
+                            label._last_text=lbl_txt;label.setText(lbl_txt)
+                        label.setPos(positions[i],heights[i])
         for name,state in self._series.items():
             if name not in names:
                 state['spec']['visible']=False

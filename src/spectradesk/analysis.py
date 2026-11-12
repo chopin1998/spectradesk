@@ -1,7 +1,8 @@
 """Analysis always consumes unsmoothed, optionally dark-corrected measurements."""
 from dataclasses import dataclass, asdict
 import numpy as np
-from scipy.signal import find_peaks
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks, peak_prominences
 
 @dataclass
 class PeakArea:
@@ -87,31 +88,33 @@ def display_smooth(y, count, method="STA"):
     return (sums[hi]-sums[lo])/(hi-lo)
 
 
-def integrate_peak(wavelength,counts,peak,start,stop):
+def integrate_peak(wavelength,counts,peak,start,stop,_context=None):
     """Local-baseline area of an automatically bounded peak, in counts*nm.
 
     A light filter locates boundaries only. Integration uses the original
     unsmoothed values. Overlapping peaks are divided at their intervening valley.
     """
-    from scipy.ndimage import gaussian_filter1d
-    from scipy.signal import peak_prominences
-    x=np.asarray(wavelength,dtype=float);raw=np.asarray(counts,dtype=float)
-    mask=(x>=start)&(x<=stop)
-    x,raw=x[mask],raw[mask]
-    if len(x)<5 or not np.isfinite(x).all() or not np.isfinite(raw).all() or np.any(np.diff(x)<=0):
-        return PeakArea(warning='分析范围或数据无效')
-    smooth=gaussian_filter1d(raw,1.)
+    if _context is not None:
+        x,raw,smooth,maxima,noise=_context
+        if x is None:return PeakArea(warning='分析范围或数据无效')
+    else:
+        x=np.asarray(wavelength,dtype=float);raw=np.asarray(counts,dtype=float)
+        mask=(x>=start)&(x<=stop)
+        x,raw=x[mask],raw[mask]
+        if len(x)<5 or not np.isfinite(x).all() or not np.isfinite(raw).all() or np.any(np.diff(x)<=0):
+            return PeakArea(warning='分析范围或数据无效')
+        smooth=gaussian_filter1d(raw,1.)
+        maxima,_=find_peaks(smooth)
+        difference=np.diff(raw)
+        noise=float(np.median(abs(difference-np.median(difference)))/.6745/np.sqrt(2))
     p=int(np.argmin(abs(x-peak.wavelength)))
     if p==0 or p==len(x)-1:return PeakArea(warning='峰位接近分析边界')
-    maxima,_=find_peaks(smooth)
     nearby=maxima[np.abs(maxima-p)<=2]
     if not len(nearby):return PeakArea(warning='峰位附近未找到局部极大值')
     p=int(nearby[np.argmax(smooth[nearby])])
     prominence,lb,rb=peak_prominences(smooth,[p])
     left,right=int(lb[0]),int(rb[0])
     if prominence[0]<=0 or left==p or right==p:return PeakArea(warning='未找到可靠峰边界')
-    difference=np.diff(raw)
-    noise=float(np.median(abs(difference-np.median(difference)))/.6745/np.sqrt(2))
     candidates,_=find_peaks(smooth,prominence=max(20.,.03*prominence[0],5*noise))
     before=candidates[candidates<p-2];after=candidates[candidates>p+2]
     lower,upper=0,len(x)-1
@@ -144,3 +147,17 @@ def integrate_peak(wavelength,counts,peak,start,stop):
     if '削顶' in peak.warning:warnings.append('削顶，面积仅为下限估计')
     area=float(np.trapezoid(raw[l:r+1]-baseline[l:r+1],x[l:r+1]))
     return PeakArea(float(x[l]),float(x[r]),area,float(baseline[l]),float(baseline[r]),'；'.join(warnings))
+
+
+def prepare_integration_context(wavelength,counts,start,stop):
+    """Precompute shared arrays once per frame when integrating multiple peaks."""
+    x=np.asarray(wavelength,dtype=float);raw=np.asarray(counts,dtype=float)
+    mask=(x>=start)&(x<=stop)
+    x,raw=x[mask],raw[mask]
+    if len(x)<5 or not np.isfinite(x).all() or not np.isfinite(raw).all() or np.any(np.diff(x)<=0):
+        return (None,None,None,None,0.)
+    smooth=gaussian_filter1d(raw,1.)
+    maxima,_=find_peaks(smooth)
+    difference=np.diff(raw)
+    noise=float(np.median(abs(difference-np.median(difference)))/.6745/np.sqrt(2))
+    return (x,raw,smooth,maxima,noise)

@@ -106,7 +106,7 @@ class Workbench(W.QMainWindow):
         for session in self.sessions:session.theme.currentIndexChanged.connect(self.sync_theme)
         self.sync_theme(self.sessions[0].theme.currentIndex())
         W.QApplication.instance().styleHints().colorSchemeChanged.connect(lambda *_:self.update_device_styles())
-        self.timer=QtCore.QTimer(self);self.timer.setInterval(100);self.timer.timeout.connect(self.refresh);self.timer.start()
+        self.timer=QtCore.QTimer(self);self.timer.setInterval(120);self.timer.timeout.connect(self.refresh);self.timer.start()
         self.tabs.currentChanged.connect(self.select_view)
         self.change_scale();self.select_view(0)
         store=QtCore.QSettings('SpectraDesk','SpectraDesk');geometry=store.value('workbench/geometry')
@@ -447,6 +447,47 @@ class Workbench(W.QMainWindow):
             if getattr(self,'_alignment_context',context)!=context:
                 self.peak_offset=0.;self.align_button.setText('峰对齐…')
             self._alignment_context=context
+        self.update_device_styles()
+        self.update_tab_states()
+        for session,(label,button,config,dark) in zip(self.sessions,self.device_cards):
+            status_txt=session.device_status.text()
+            if label.text()!=status_txt:label.setText(status_txt)
+            btn_txt='断开设备' if session.ready else '连接设备'
+            if button.text()!=btn_txt:button.setText(btn_txt)
+            button.setEnabled(session.connect_button.isEnabled())
+            if config is not None:
+                config.setEnabled(session.camera_button.isEnabled())
+                dark_txt=session.camera_dark.text()
+                if dark.text()!=dark_txt:dark.setText(dark_txt)
+                dark.setEnabled(session.camera_dark.isEnabled())
+
+        # Skip expensive comparison plot recomputation when neither comparison tab is active
+        # and the underlying session frame serials have not changed.
+        tab_idx=self.tabs.currentIndex()
+        frame_key=(
+            tab_idx,
+            self.peak_offset,
+            self.dual_axis,
+            self.align_bottom.isChecked(),
+            tuple(c.isChecked() for c in self.visible),
+            tuple(
+                (
+                    id(s.frame_data),
+                    s.frame_data.get('index') if s.frame_data else None,
+                    s.mode.currentIndex(),
+                    s.smooth.value(),
+                    s.display_start.value(),
+                    s.display_end.value(),
+                    s.calibration_enabled.isChecked(),
+                    s.nonlinearity_enabled.isChecked(),
+                )
+                for s in self.sessions
+            ),
+        )
+        if getattr(self,'_last_refresh_key',None)==frame_key:
+            return
+        self._last_refresh_key=frame_key
+
         for i,(session,curve,check) in enumerate(zip(self.sessions,self.curves,self.visible)):
             name=('FLA5000','摄像头')[i];f=session.frame_data
             self.style_curve(curve,session.mode.currentIndex(),i)
@@ -484,15 +525,6 @@ class Workbench(W.QMainWindow):
             self.plot.set_display_range(low,high)
         self.fit_comparison_axes()
         self.align_overlay_zero()
-        self.update_device_styles()
-        self.update_tab_states()
-        for session,(label,button,config,dark) in zip(self.sessions,self.device_cards):
-            label.setText(session.device_status.text())
-            button.setText('断开设备' if session.ready else '连接设备')
-            button.setEnabled(session.connect_button.isEnabled())
-            if config is not None:
-                config.setEnabled(session.camera_button.isEnabled())
-                dark.setText(session.camera_dark.text());dark.setEnabled(session.camera_dark.isEnabled())
 
     def bottom_alignment_changed(self,*_):
         for view in (self.plot.getViewBox(),self.right):view._spectra_y_state=None

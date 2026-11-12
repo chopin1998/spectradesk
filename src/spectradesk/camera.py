@@ -114,12 +114,17 @@ def wavelength_aligned_strip(rgb,wavelengths):
     """Resample only the display image onto a uniform calibrated wavelength grid."""
     wave=np.asarray(wavelengths,dtype=float)
     if rgb.ndim!=3 or rgb.shape[1]!=len(wave) or len(wave)<2 or np.any(np.diff(wave)<=0):raise ValueError('光带图像与波长坐标不匹配')
-    uniform=np.linspace(wave[0],wave[-1],len(wave))
-    result=np.empty_like(rgb)
-    for row in range(rgb.shape[0]):
-        for channel in range(3):result[row,:,channel]=np.rint(np.interp(uniform,wave,rgb[row,:,channel])).astype(np.uint8)
+    n=len(wave)
+    uniform=np.linspace(wave[0],wave[-1],n)
     step=uniform[1]-uniform[0]
-    return result,float(uniform[0]-step/2),float(step*len(uniform))
+    # Fast vectorized 2D linear interpolation across all rows and RGB channels simultaneously
+    idx=np.clip(np.searchsorted(wave,uniform,side='right')-1,0,n-2)
+    w0=wave[idx];w1=wave[idx+1]
+    t=((uniform-w0)/(w1-w0))[None,:,None]
+    left_px=rgb[:,idx,:].astype(np.float32)
+    right_px=rgb[:,idx+1,:].astype(np.float32)
+    result=np.rint(left_px+(right_px-left_px)*t).astype(np.uint8)
+    return result,float(uniform[0]-step/2),float(step*n)
 
 class CameraDriver:
     def __init__(self,path,profile):self.path=path;self.profile=profile;self.cap=None;self.parameter=None;self.exposure_auto=True;self.exposure_value=78;self.exposure_used=78;self._exposure_changed=False;self.exposure_max=10000
