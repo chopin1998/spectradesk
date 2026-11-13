@@ -20,3 +20,19 @@ def test_shared_workbench_gpu_views():
     root=Path(__file__).parents[1]
     result=subprocess.run([sys.executable,str(root/'tools/verify_workbench_gpu.py')],cwd=root,env=dict(os.environ,QT_QPA_PLATFORM='xcb'),capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
+
+
+@pytest.mark.parametrize('es,version', [(False,(3,1)), (False,(2,1)), (True,(3,0))])
+def test_shader_smoothstep_has_defined_edges(es, version):
+    # Reversed constant edges are undefined by GLSL, even if one driver renders them.
+    import re
+    from types import SimpleNamespace
+    from spectradesk.gpu_curve import shader_sources
+    context=SimpleNamespace(isOpenGLES=lambda:es,
+        format=lambda:SimpleNamespace(version=lambda:version))
+    calls=[]
+    for source in shader_sources(context):
+        calls.extend(re.findall(r'smoothstep\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,',source))
+    assert calls, 'No smoothstep coverage'
+    for low,high in calls:
+        assert float(low)<float(high), f'Undefined GLSL smoothstep edges: {low}, {high}'

@@ -66,7 +66,18 @@ try:
         assert np.max(abs(actual.astype(float)-expected))<5,(wave,actual,expected)
     assert np.count_nonzero(images[2][:,:,3])>10*np.count_nonzero(images[1][:,:,3]),'Fill is missing'
     # A new line lower on the same axes must leave a fading, correctly located old trace.
-    old=images[3];old_mask=old[:,:,3]>200
+    old=images[3]
+    # A flat phosphor line has a bright core and a weaker halo on both sides.
+    # Read actual pixels to exercise both desktop GL and the ES shader variant.
+    point=win.spectrum_view.mapViewToScene(QtCore.QPointF(550.,5000.))
+    column=round(point.x()*win.plot.viewport().devicePixelRatioF())
+    profile=old[:,column,3].astype(float)
+    center=round(float(np.average(np.arange(len(profile)),weights=profile)))
+    assert profile[center]>200, 'Phosphor core is missing'
+    radius=round(2*win.plot.viewport().devicePixelRatioF())
+    halo=profile[[center-radius,center+radius]]
+    assert np.all((halo>0)&(halo<profile[center]*.8)), ('Phosphor halo',halo)
+    old_mask=old[:,:,3]>200
     clock[0]=.55;win.frame_data=dict(frame,mean=np.full(2048,1000.));win.render()
     faded=capture()
     assert old_mask.any() and faded[:,:,3][old_mask].mean()<old[:,:,3][old_mask].mean()*.5

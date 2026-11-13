@@ -117,7 +117,7 @@ class Window(W.QMainWindow):
     connect_request=QtCore.Signal();disconnect_request=QtCore.Signal()
     integration_request=QtCore.Signal(int);exposure_auto_request=QtCore.Signal(bool);average_request=QtCore.Signal(int);start_request=QtCore.Signal(int,int,bool);stop_request=QtCore.Signal();auto_request=QtCore.Signal()
     def __init__(self,args):
-        super().__init__();self._closing=False;self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self.sampling_context=None;self.capture_started_at=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
+        super().__init__();self.render_revision=0;self._closing=False;self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self.sampling_context=None;self.capture_started_at=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
         self.setWindowTitle('SpectraDesk · 光谱测量工作台');area=W.QApplication.primaryScreen().availableGeometry();self.resize(min(1560,int(area.width()*.94)),min(1000,int(area.height()*.94)));self.setMinimumSize(1180,760)
         self.camera_profile_path=Path(QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.StandardLocation.AppConfigLocation))/'camera-profile.json'
         self.camera_profile=CameraProfile.load(Path(__file__).with_name('data')/'camera-2025051804.json')
@@ -540,6 +540,8 @@ class Window(W.QMainWindow):
         if self.range_start.value()>=self.range_end.value():notes.insert(0,'分析起点必须小于终点')
         self.plot.set_spectrum_series([dict(name='摄像头' if camera else 'FLA5000',x=x,y=shown,peaks=self.peaks,unit=unit,color='#b98c40')])
         self.warning_label.setText('  ·  '.join(notes));self.warning_label.setVisible(bool(notes))
+        # Derived data can change while acquisition is paused (range, dark, calibration).
+        self.render_revision+=1
     def update_navigation(self,*args):
         low,high=self.spectrum_view.viewRange()[0]
         self.navigation_label.setText(f'显示 {low:.1f}–{high:.1f} nm')

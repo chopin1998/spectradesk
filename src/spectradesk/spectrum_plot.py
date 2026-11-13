@@ -58,6 +58,8 @@ class SpectrumPlot(pg.PlotWidget):
         for name,state in self._series.items():
             if name not in names:
                 state['spec']['visible']=False
+                # Reappearing identical data must restore the annotations hidden below.
+                state['peak_key']=None
                 for item in [state['cursor'],state['peaks']]+state['labels']:item.hide()
         self.update_spectrum_cursor()
     def hover_spectrum(self,position):

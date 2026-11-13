@@ -461,8 +461,8 @@ class Workbench(W.QMainWindow):
                 if dark.text()!=dark_txt:dark.setText(dark_txt)
                 dark.setEnabled(session.camera_dark.isEnabled())
 
-        # Skip expensive comparison plot recomputation when neither comparison tab is active
-        # and the underlying session frame serials have not changed.
+        # Reuse comparison plots only while both source frames and rendered results
+        # are unchanged; processing controls can change results without a new frame.
         tab_idx=self.tabs.currentIndex()
         frame_key=(
             tab_idx,
@@ -473,6 +473,7 @@ class Workbench(W.QMainWindow):
             tuple(
                 (
                     id(s.frame_data),
+                    s.render_revision,
                     s.frame_data.get('index') if s.frame_data else None,
                     s.mode.currentIndex(),
                     s.smooth.value(),

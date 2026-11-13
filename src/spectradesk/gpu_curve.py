@@ -81,7 +81,7 @@ vec3 rainbow(float t){
 void main(){
  vec3 base=u_rainbow==1?rainbow((wavelength-380.)/400.):u_color.rgb;
  float d=abs(v_edge);
- float core=smoothstep(0.75,0.0,d);
+ float core=1.0-smoothstep(0.0,0.75,d);
  if(u_glow==1){
   float halo=exp(-3.8*d*d);
   vec3 col=mix(base,vec3(0.88,1.0,0.95),core*0.32);
