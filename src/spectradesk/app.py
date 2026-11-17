@@ -24,7 +24,8 @@ STYLE='''
 QMainWindow,QWidget#root {background:#eeeef0;color:#263349;}
 QWidget {color:#263349;}
 QFrame#panel {background:#fafaf9;border:1px solid #d4d9df;border-radius:7px;}
-QLabel#muted {color:#586777;font-size:10pt;}
+QLabel#muted,QLabel#inlineNotice {color:#586777;font-size:10pt;}
+QLabel#inlineNotice[warning="true"] {color:#9a4e12;font-weight:600;}
 QLabel#title {font-size:21pt;font-weight:600;letter-spacing:1px;color:#213a59;}
 QLabel#section {color:#526477;font-size:11pt;font-weight:600;}
 QLabel#metric {font-size:26pt;font-weight:500;color:#213a59;}
@@ -67,6 +68,7 @@ def apply_theme(app,mode="跟随系统"):
              'QPushButton#disconnect {background:#83483f;color:#ffffff;border-color:#b87366;} QPushButton#disconnect:hover {background:#9c574c;}') if dark else (
              'QPushButton#connect {background:#2d7653;color:#ffffff;border-color:#2d7653;} QPushButton#connect:hover {background:#245f43;} '
              'QPushButton#disconnect {background:#a44b3f;color:#ffffff;border-color:#a44b3f;} QPushButton#disconnect:hover {background:#883d33;}')
+    if dark:palette+='QLabel#inlineNotice[warning="true"] {color:#ffc278;}'
     palette+=accents+'QPushButton#connect:disabled,QPushButton#disconnect:disabled {background:#3b4654;color:#788797;border-color:#536377;}' if dark else accents+'QPushButton#connect:disabled,QPushButton#disconnect:disabled {background:#edf0f2;color:#8a949f;border-color:#d5dce2;}'
     colors={
         'Window':('#eeeef0','#171c23'),'WindowText':('#263349','#dce4ed'),
@@ -254,9 +256,14 @@ class Window(W.QMainWindow):
         self.plot.viewport().installEventFilter(self);self.plot.cursorMoved.connect(self.shared_cursor_moved)
         self.baseline=pg.InfiniteLine(pos=0,angle=0,movable=False,pen=pg.mkPen('#8a98a5',style=QtCore.Qt.PenStyle.DashLine));self.plot.addItem(self.baseline)
         l.addWidget(self.plot,1)
-        self.navigation_label=self.label('','muted');self.navigation_label.setWordWrap(True);l.addWidget(self.navigation_label)
+        navigation=W.QHBoxLayout()
+        self.lock_y_axis=W.QCheckBox('锁定 Y 轴');self.lock_y_axis.toggled.connect(self.set_y_axis_locked);navigation.addWidget(self.lock_y_axis)
+        self.navigation_label=self.label('','muted');navigation.addWidget(self.navigation_label)
+        self.warning_label=self.label('','inlineNotice');self.warning_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.warning_label.setSizePolicy(W.QSizePolicy.Policy.Ignored,W.QSizePolicy.Policy.Fixed)
+        navigation.addWidget(self.warning_label,1);l.addLayout(navigation)
         self.spectrum_view.sigRangeChanged.connect(self.update_navigation)
-        self.warning_label=self.label('','muted');self.warning_label.setWordWrap(True);self.warning_label.hide();l.addWidget(self.warning_label);main.addWidget(graph,1)
+        main.addWidget(graph,1)
         panel,l=self.card();top=W.QHBoxLayout();top.addWidget(self.label('峰值分析','section'));top.addStretch();top.addWidget(self.label('分析范围 / nm','muted'))
         self.range_start=DigitDoubleSpinBox();self.range_end=DigitDoubleSpinBox()
         for box,value in [(self.range_start,350),(self.range_end,900)]:box.setDecimals(1);box.setRange(200,1100);box.setValue(value);box.setFixedWidth(max(118,self.fontMetrics().horizontalAdvance('1100.0')+48));box.valueChanged.connect(self.render);top.addWidget(box)
@@ -375,7 +382,7 @@ class Window(W.QMainWindow):
     def on_error(self,text):
         if self._closing:return
         self.pending_dark=False;self.connecting=False;self.sampling_indicator.stop();self.last_time=None
-        self.device_status.setText('连接异常');self.status.showMessage(text);self.warning_label.setText(text);self.warning_label.show();self.busy=False;self.set_controls(False)
+        self.device_status.setText('连接异常');self.status.showMessage(text);self.show_notice(text);self.busy=False;self.set_controls(False)
         if self.args.smoke:print(text,file=sys.stderr);self.args.failed=True;self.close()
     def start(self,continuous):
         p=self.integration.value();self.last_time=None
@@ -396,7 +403,7 @@ class Window(W.QMainWindow):
         with QtCore.QSignalBlocker(self.average):self.average.setValue(average)
     @QtCore.Slot(int,str)
     def on_auto(self,p,text):
-        self.update_integration(p);self.persist_settings();self.warning_label.setText(text);self.warning_label.setVisible(bool(text))
+        self.update_integration(p);self.persist_settings();self.show_notice(text)
     @QtCore.Slot(float,int,int)
     def on_capture_started(self,started,parameter,average):
         if self._closing:return
@@ -536,21 +543,45 @@ class Window(W.QMainWindow):
         notes=[]
         if camera and f.get('camera_exposure_ms') is not None:notes.append(f"曝光 {f['camera_exposure_ms']:.1f} ms")
         if camera:notes.append('摄像头灰度 DN · 未做光谱响应定标'+(' · 包含校准点范围外的外推' if np.any(f['extra']) else ''))
-        if clipped:notes.insert(0,'⚠ 光带颜色通道饱和；最短曝光仍饱和时请减弱入光' if camera else '⚠ 原始帧接近实测削顶水平')
+        if clipped:notes.insert(0,'光带颜色通道饱和；最短曝光仍饱和时请减弱入光' if camera else '原始帧接近实测削顶水平')
         if self.range_start.value()>=self.range_end.value():notes.insert(0,'分析起点必须小于终点')
         self.plot.set_spectrum_series([dict(name='摄像头' if camera else 'FLA5000',x=x,y=shown,peaks=self.peaks,unit=unit,color='#b98c40')])
-        self.warning_label.setText('  ·  '.join(notes));self.warning_label.setVisible(bool(notes))
+        self.show_notice('  ·  '.join(notes),warning=clipped or self.range_start.value()>=self.range_end.value())
         # Derived data can change while acquisition is paused (range, dark, calibration).
         self.render_revision+=1
+    def show_notice(self,text,warning=True):
+        # A permanent single-line slot prevents frame warnings from moving the plot.
+        text=' '.join(text.split())
+        emphasized=bool(text) and warning
+        label=self.warning_label
+        if label.property('warning')!=emphasized:
+            label.setProperty('warning',emphasized);label.style().unpolish(label);label.style().polish(label)
+        label.setText(('❗ ' if emphasized else '')+text)
+        label.setToolTip(text)
     def update_navigation(self,*args):
         low,high=self.spectrum_view.viewRange()[0]
         self.navigation_label.setText(f'显示 {low:.1f}–{high:.1f} nm')
+    def set_y_axis_locked(self,locked):
+        self.spectrum_view.y_scale_locked=locked
+        if locked:self.spectrum_view.enableAutoRange(axis='y',enable=False)
+        else:
+            self.axis_context=None
+            self.fit_display()
     def fit_display(self):
         if self.frame_data is None:return
         x=self.frame_data['wave'];y=self.displayed
+        if self.frame_data.get('backend')=='camera':self.spectrum_view.y_scale_limits=(1.,1024.)
+        else:
+            finite=y[np.isfinite(y)]
+            peak=float(finite.max()) if finite.size else 0.
+            self.spectrum_view.y_scale_limits=(100.,max(100.,peak*2.5))
         low=max(float(x.min()),self.display_start.value());high=min(float(x.max()),self.display_end.value())
         if high<=low:
             self.navigation_label.setText('显示波长无效：下限须小于上限，且在设备波段内');return
+        self.plot.set_display_range(low,high)
+        if self.lock_y_axis.isChecked():
+            self.update_navigation()
+            return
         mask=(x>=low)&(x<=high)&np.isfinite(y)
         if not np.any(mask):
             self.navigation_label.setText('所选范围内没有采样点');return
@@ -570,7 +601,7 @@ class Window(W.QMainWindow):
                 if self.axis_shrink_since is None:self.axis_shrink_since=now
                 elif now-self.axis_shrink_since>=2:self.axis_limits=desired;self.axis_shrink_since=None
             else:self.axis_shrink_since=None
-        self.plot.set_display_range(low,high);self.plot.setYRange(*self.axis_limits,padding=0)
+        self.plot.setYRange(*self.axis_limits,padding=0)
         self.update_navigation()
     def reset_plot(self):
         self.plot.reset_navigation()
@@ -701,6 +732,8 @@ class ToolTipFilter(QtCore.QObject):
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--renderer',choices=['raster','opengl','cached-image'],default='opengl',help='Drawing backend (default: opengl; raster is the software fallback)');parser.add_argument('--demo',action='store_true');parser.add_argument('--connect',action='store_true',help='Connect on startup (now the default; does not start acquisition)');parser.add_argument('--smoke',help='Save screenshot and one measurement then exit');args=parser.parse_args()
     app=W.QApplication(sys.argv[:1]);app.setApplicationName('SpectraDesk')
+    app.setDesktopFileName('spectradesk')
+    app.setWindowIcon(QtGui.QIcon(str(Path(__file__).with_name('data')/'spectradesk.svg')))
     tooltip_filter=ToolTipFilter(app);app.installEventFilter(tooltip_filter)
     instance_lock=acquire_instance_lock()
     if instance_lock is None:

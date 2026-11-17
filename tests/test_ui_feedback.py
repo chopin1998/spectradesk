@@ -54,3 +54,50 @@ assert phase==1
     env=dict(os.environ,QT_QPA_PLATFORM='offscreen',XDG_CONFIG_HOME=str(tmp_path),PYTHONDONTWRITEBYTECODE='1')
     result=subprocess.run([sys.executable,'-c',script],env=env,capture_output=True,text=True,timeout=15)
     assert result.returncode==0,result.stdout+result.stderr
+
+
+def test_inline_notices_do_not_move_or_resize_main_plot(tmp_path):
+    script='''
+from argparse import Namespace
+import numpy as np
+from PySide6 import QtWidgets as W
+from spectradesk.app import Window
+app=W.QApplication([])
+win=Window(Namespace(demo=True,connect=False,smoke=None,renderer='raster'))
+win._startup_timer.stop();win.show()
+def settle():
+    for _ in range(3):app.processEvents()
+try:
+    x=np.linspace(279,975,2048)
+    base=dict(wave=x,mean=np.full(2048,5000.),extra=np.zeros(2048),parameter=3000,
+        average=2,demo=True,device=dict(serial='test'),index=1,elapsed=.04)
+    for theme in (1,2):
+        win.theme.setCurrentIndex(theme)
+        win.frame_data=dict(base,adc_frames=np.full((2,2048),32760,dtype=np.uint16))
+        win.render();settle()
+        rect=win.plot.geometry();size=win.size()
+        for clipped in (True,False,True,False):
+            win.frame_data=dict(base,adc_frames=np.full((2,2048),10000 if clipped else 32760,dtype=np.uint16))
+            win.render();settle()
+            assert win.plot.geometry()==rect and win.size()==size
+            assert bool(win.warning_label.text())==clipped
+            if clipped:
+                assert win.warning_label.text().startswith('❗ ')
+                assert '削顶' in win.warning_label.text()
+                assert win.warning_label.geometry().left()>win.navigation_label.geometry().left()
+            assert win.warning_label.geometry().center().y()==win.navigation_label.geometry().center().y()
+        message='设备通讯错误'+chr(10)+('很长的提示文字 '*60)
+        win.on_error(message);settle()
+        assert win.plot.geometry()==rect and win.size()==size
+        assert not win.warning_label.wordWrap()
+        assert chr(10) not in win.warning_label.text()
+        assert win.warning_label.toolTip()==' '.join(message.split())
+        win.show_notice('曝光 20 ms · 摄像头灰度 DN',warning=False);settle()
+        assert not win.warning_label.text().startswith('❗')
+        assert win.plot.geometry()==rect
+finally:
+    win.close();app.processEvents()
+'''
+    result=subprocess.run([sys.executable,'-c',script],capture_output=True,text=True,timeout=20,
+        env=dict(os.environ,QT_QPA_PLATFORM='offscreen',XDG_CONFIG_HOME=str(tmp_path),PYTHONDONTWRITEBYTECODE='1'))
+    assert result.returncode==0,result.stdout+result.stderr

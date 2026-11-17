@@ -49,3 +49,45 @@ if errors:raise errors[0]
     env=dict(os.environ,QT_QPA_PLATFORM='offscreen',XDG_CONFIG_HOME=str(tmp_path),PYTHONDONTWRITEBYTECODE='1')
     result=subprocess.run([sys.executable,'-c',script],capture_output=True,text=True,env=env,timeout=15)
     assert result.returncode==0,result.stdout+result.stderr
+
+
+def test_y_axis_lock_preserves_range_and_unlocks_immediately(tmp_path):
+    script="""
+from argparse import Namespace
+import numpy as np
+from PySide6 import QtWidgets as W
+from spectradesk.app import Window
+app=W.QApplication([])
+win=Window(Namespace(demo=True,connect=False,smoke=None,renderer='raster'))
+win._startup_timer.stop()
+try:
+    x=np.linspace(279,975,2048)
+    base=dict(wave=x,extra=np.zeros(2048),adc_frames=np.full((2,2048),32760,dtype=np.uint16),
+        parameter=3000,average=2,demo=True,device=dict(serial='test'),index=1,elapsed=.04)
+    for backend in ('fla5000','camera'):
+        win.frame_data=dict(base,backend=backend,mean=np.full(2048,100.))
+        win.render()
+        frozen=tuple(win.spectrum_view.viewRange()[1])
+        win.lock_y_axis.setChecked(True)
+        for amplitude in (10000.,1.):
+            win.frame_data=dict(base,backend=backend,mean=np.full(2048,amplitude),parameter=100)
+            win.render()
+            np.testing.assert_allclose(win.spectrum_view.viewRange()[1],frozen,rtol=0,atol=1e-9)
+        # X navigation and processing still work while only Y is frozen.
+        win.display_start.setValue(420);win.display_end.setValue(680)
+        win.smooth.setValue(2);win.render()
+        np.testing.assert_allclose(win.spectrum_view.viewRange()[0],[420,680])
+        np.testing.assert_allclose(win.spectrum_view.viewRange()[1],frozen)
+        win.reset_plot()
+        np.testing.assert_allclose(win.spectrum_view.viewRange()[1],frozen)
+        win.frame_data=dict(base,backend=backend,mean=np.full(2048,10000.))
+        win.render()
+        win.lock_y_axis.setChecked(False)
+        assert win.spectrum_view.viewRange()[1][1]>10000
+        assert win.spectrum_view.viewRange()[1][1]>frozen[1]
+finally:
+    win.close();app.processEvents()
+"""
+    result=subprocess.run([sys.executable,'-c',script],capture_output=True,text=True,timeout=20,
+        env=dict(os.environ,QT_QPA_PLATFORM='offscreen',XDG_CONFIG_HOME=str(tmp_path),PYTHONDONTWRITEBYTECODE='1'))
+    assert result.returncode==0,result.stdout+result.stderr

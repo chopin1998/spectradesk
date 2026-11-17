@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SpectraDesk
+Comment=光谱测量工作台
+Exec=spectradesk
+Icon=spectradesk
+Terminal=false
+Categories=Science;Graphics;
+StartupWMClass=spectradesk
