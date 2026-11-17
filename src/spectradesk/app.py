@@ -119,7 +119,7 @@ class Window(W.QMainWindow):
     connect_request=QtCore.Signal();disconnect_request=QtCore.Signal()
     integration_request=QtCore.Signal(int);exposure_auto_request=QtCore.Signal(bool);average_request=QtCore.Signal(int);start_request=QtCore.Signal(int,int,bool);stop_request=QtCore.Signal();auto_request=QtCore.Signal()
     def __init__(self,args):
-        super().__init__();self.render_revision=0;self._closing=False;self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self.sampling_context=None;self.capture_started_at=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
+        super().__init__();self.render_revision=0;self._closing=False;self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self._last_telemetry_at=0.0;self.sampling_context=None;self.capture_started_at=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
         self.setWindowTitle('SpectraDesk · 光谱测量工作台');area=W.QApplication.primaryScreen().availableGeometry();self.resize(min(1560,int(area.width()*.94)),min(1000,int(area.height()*.94)));self.setMinimumSize(1180,760)
         self.camera_profile_path=Path(QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.StandardLocation.AppConfigLocation))/'camera-profile.json'
         self.camera_profile=CameraProfile.load(Path(__file__).with_name('data')/'camera-2025051804.json')
@@ -217,7 +217,7 @@ class Window(W.QMainWindow):
         main=W.QVBoxLayout();main.setSpacing(12);body.addLayout(main,1)
         cards=W.QHBoxLayout();self.metric_labels=[];self.metric_units=[]
         for title,unit in [('主峰波长','nm'),('半高全宽 FWHM','nm'),('峰顶强度','counts')]:
-            card,cl=self.card();cl.setSpacing(3);cl.addWidget(self.label(title,'section'));metric=self.label('—','metric');cl.addWidget(metric);unit_label=self.label(unit,'muted');cl.addWidget(unit_label);self.metric_units.append(unit_label);self.metric_labels.append(metric);cards.addWidget(card)
+            card,cl=self.card();cl.setSpacing(3);cl.addWidget(self.label(title,'section'));metric=self.label('—','metric');metric.setSizePolicy(W.QSizePolicy.Policy.Ignored,W.QSizePolicy.Policy.Preferred);cl.addWidget(metric);unit_label=self.label(unit,'muted');cl.addWidget(unit_label);self.metric_units.append(unit_label);self.metric_labels.append(metric);cards.addWidget(card)
         main.addLayout(cards)
         graph,l=self.card();graph.setMinimumHeight(220);l.setContentsMargins(12,10,12,10)
         topline=W.QHBoxLayout();topline.addWidget(self.label('光谱 / SPECTRUM','section'));topline.addStretch();self.cursor_label=self.label('移动鼠标查看波长与强度','muted');topline.addWidget(self.cursor_label);l.addLayout(topline)
@@ -416,18 +416,26 @@ class Window(W.QMainWindow):
     @QtCore.Slot(object)
     def on_frame(self,frame):
         if self._closing:return
-        self.frame_data=frame;self.save_button.setEnabled(True)
-        if frame.get('backend')=='camera' and 'camera_exposure_ms' in frame:
+        was_empty=self.frame_data is None
+        self.frame_data=frame
+        if not self.save_button.isEnabled():self.save_button.setEnabled(True)
+        now_mono=time.monotonic()
+        telemetry=not getattr(self,'continuous',False) or was_empty or (now_mono-self._last_telemetry_at)>=0.18
+        if telemetry:self._last_telemetry_at=now_mono
+        if telemetry and frame.get('backend')=='camera' and 'camera_exposure_ms' in frame:
             ms=frame['camera_exposure_ms'];auto=frame.get('camera_exposure_mode')=='spectrum-auto'
             limit=' · 已到最短' if ms<=7.8 else (' · 已到最长' if ms>=frame.get('device',{}).get('camera_exposure_max',10000)/10 else '')
-            self.camera_exposure_status.setText(f"{'自动' if auto else '手动'} · 设定 {ms:.1f} ms"+limit+f" · 峰值 {float(np.max(frame['mean'])):.1f} DN")
+            txt=f"{'自动' if auto else '手动'} · 设定 {ms:.1f} ms"+limit+f" · 峰值 {float(np.max(frame['mean'])):.1f} DN"
+            if self.camera_exposure_status.text()!=txt:self.camera_exposure_status.setText(txt)
         if self.raw_preview_toggle.isChecked():self.update_raw_preview()
-        now=time.monotonic() if self.capture_started_at is None else self.capture_started_at+frame['elapsed']
+        now=now_mono if self.capture_started_at is None else self.capture_started_at+frame['elapsed']
         period=max(frame['elapsed'],1e-6) if self.last_time is None else max(now-self.last_time,1e-6)
         self.last_time=now;self.sampling_indicator.complete(period)
-        rate=f'  ·  {1/period:.1f} Hz' if period<=.2 else ''
-        self.measure_status.setText(f"{frame['index']} 帧{rate}  ·  读取 {frame['elapsed']*1000:.1f} ms")
-        self.render();self.set_controls(self.ready)
+        if telemetry:
+            rate=f'  ·  {1/period:.1f} Hz' if period<=.2 else ''
+            self.measure_status.setText(f"{frame['index']} 帧{rate}  ·  读取 {frame['elapsed']*1000:.1f} ms")
+        self.render(telemetry=telemetry)
+        if was_empty:self.set_controls(self.ready)
         if self.args.smoke and not getattr(self,'smoke_scheduled',False):
             self.smoke_scheduled=True;QtCore.QTimer.singleShot(200,self.finish_smoke)
     def show_raw_preview(self,enabled):
@@ -456,7 +464,7 @@ class Window(W.QMainWindow):
             y,self.processing=correct_counts(y,self.profile,nonlinear=self.nonlinearity_enabled.isChecked(),manual_dark=dark)
         elif dark is not None:y-=dark
         return y,dark
-    def render(self,*_):
+    def render(self,*_,telemetry=True):
         if self._closing:return
         if self.frame_data is None:return
         f=self.frame_data
@@ -495,6 +503,9 @@ class Window(W.QMainWindow):
             self.phosphor.update_spectrum(x,shown,(xr[0],xr[1],yr[0],yr[1]))
         elif self.phosphor.isVisible():self.phosphor.reset()
         self.update_cursor_marker()
+        if not telemetry:
+            self.render_revision+=1
+            return
         self.peaks=analyze(x,y,self.range_start.value(),self.range_end.value(),minimum_prominence=1 if f.get('backend')=='camera' else 20)
         camera=f.get('backend')=='camera'
         unit='DN' if camera else 'counts'
@@ -556,11 +567,14 @@ class Window(W.QMainWindow):
         label=self.warning_label
         if label.property('warning')!=emphasized:
             label.setProperty('warning',emphasized);label.style().unpolish(label);label.style().polish(label)
-        label.setText(('❗ ' if emphasized else '')+text)
-        label.setToolTip(text)
+        display_text=('❗ ' if emphasized else '')+text
+        if label.text()!=display_text:
+            label.setText(display_text)
+            label.setToolTip(text)
     def update_navigation(self,*args):
         low,high=self.spectrum_view.viewRange()[0]
-        self.navigation_label.setText(f'显示 {low:.1f}–{high:.1f} nm')
+        txt=f'显示 {low:.1f}–{high:.1f} nm'
+        if self.navigation_label.text()!=txt:self.navigation_label.setText(txt)
     def set_y_axis_locked(self,locked):
         self.spectrum_view.y_scale_locked=locked
         if locked:self.spectrum_view.enableAutoRange(axis='y',enable=False)

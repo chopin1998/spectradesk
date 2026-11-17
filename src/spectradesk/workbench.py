@@ -464,6 +464,8 @@ class Workbench(W.QMainWindow):
         # Reuse comparison plots only while both source frames and rendered results
         # are unchanged; processing controls can change results without a new frame.
         tab_idx=self.tabs.currentIndex()
+        if tab_idx not in (2,3):
+            return
         frame_key=(
             tab_idx,
             self.peak_offset,
