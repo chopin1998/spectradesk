@@ -68,6 +68,54 @@ def analyze(wavelength, counts, start, stop, minimum_prominence=20):
     return peaks
 
 
+def analyze_manual_peak(wavelength, counts, start, stop, clip_threshold=16500):
+    """Find the highest peak and compute FWHM + trapezoidal area within user-specified [start, stop]."""
+    if start >= stop:
+        return None
+    x = np.asarray(wavelength, dtype=float)
+    y = np.asarray(counts, dtype=float)
+    mask = (x >= start) & (x <= stop) & np.isfinite(x) & np.isfinite(y)
+    x, y = x[mask], y[mask]
+    if len(x) < 2 or np.any(np.diff(x) <= 0):
+        return None
+    p = int(np.argmax(y))
+    peak_wave = float(x[p])
+    peak_int = float(y[p])
+    baseline_arr = np.interp(x, [x[0], x[-1]], [y[0], y[-1]])
+    base_at_p = float(baseline_arr[p])
+    left = right = width = None
+    warning = ""
+    if peak_int > base_at_p:
+        half = base_at_p + (peak_int - base_at_p) / 2
+        l, r = p, p
+        while l > 0 and y[l] > half:
+            l -= 1
+        while r < len(y) - 1 and y[r] > half:
+            r += 1
+        if y[l] <= half and y[r] <= half and l < p < r:
+            left = float(x[l] + (half - y[l]) / (y[l + 1] - y[l]) * (x[l + 1] - x[l]))
+            right = float(x[r - 1] + (half - y[r - 1]) / (y[r] - y[r - 1]) * (x[r] - x[r - 1]))
+            width = right - left
+        else:
+            warning = "半高交点超出指定范围"
+    else:
+        warning = "区间内峰值未高于两端基线"
+    if clip_threshold is not None and peak_int >= clip_threshold:
+        width = None
+        warning = "峰顶可能削顶，半高宽无效"
+    area_val = float(np.trapezoid(y - baseline_arr, x))
+    area = PeakArea(
+        start=float(x[0]),
+        end=float(x[-1]),
+        value=area_val,
+        baseline_start=float(y[0]),
+        baseline_end=float(y[-1]),
+        warning=warning,
+        method="manual-bounds-trapezoid;endpoint-linear-baseline",
+    )
+    return Peak(peak_wave, peak_int, base_at_p, width, left, right, warning, area)
+
+
 def display_smooth(y, count, method="STA"):
     """Display-only filters; never modify input measurement."""
     x = np.asarray(y, dtype=np.float64)

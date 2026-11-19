@@ -16,7 +16,7 @@ from .plot_view import SpectrumViewBox
 from .sampling_indicator import SamplingIndicator
 from .phosphor import PhosphorImage
 from .gpu_curve import GpuSpectrumCurve
-from .analysis import analyze,display_smooth,integrate_peak,prepare_integration_context
+from .analysis import analyze,analyze_manual_peak,display_smooth,integrate_peak,prepare_integration_context
 from .storage import save_measurement
 from .calibration import profile_for, correct_counts, sta_smooth
 
@@ -50,6 +50,8 @@ QScrollBar::handle:vertical {background:#b0beca;border-radius:4px;min-height:30p
 QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical {height:0;}
 QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical {background:#eeeef0;}
 QMessageBox,QDialog {background:#fafaf9;}
+QSplitter::handle:vertical {height:7px;margin:2px 40%;background:#c7d0da;border-radius:3px;}
+QSplitter::handle:vertical:hover {background:#6284a7;}
 '''
 
 def apply_theme(app,mode="跟随系统"):
@@ -61,7 +63,7 @@ def apply_theme(app,mode="跟随系统"):
     font.setPointSizeF(base);app.setFont(font);app.setStyle('Fusion')
     palette=STYLE
     if dark:
-        for a,b in {'#eeeef0':'#171c23','#263349':'#dce4ed','#fafaf9':'#212934','#d4d9df':'#3b4654','#586777':'#a2b1c2','#213a59':'#c9def2','#526477':'#aebfd0','#e2ece8':'#253e36','#315c4d':'#9ed3b5','#c4d6cd':'#466557','#f8f9fb':'#2a3543','#bcc8d3':'#536377','#e7edf5':'#36495d','#8a949f':'#788797','#edf0f2':'#252e39','#d5dce2':'#3b4654','#ffffff':'#18212c','#dce7f2':'#344d67','#f0f3f6':'#273341','#dce1e6':'#3b4654','#eaf0f5':'#2b3949','#40566d':'#c1d0df'}.items():palette=palette.replace(a,b)
+        for a,b in {'#eeeef0':'#171c23','#263349':'#dce4ed','#fafaf9':'#212934','#d4d9df':'#3b4654','#586777':'#a2b1c2','#213a59':'#c9def2','#526477':'#aebfd0','#e2ece8':'#253e36','#315c4d':'#9ed3b5','#c4d6cd':'#466557','#f8f9fb':'#2a3543','#bcc8d3':'#536377','#e7edf5':'#36495d','#8a949f':'#788797','#edf0f2':'#252e39','#d5dce2':'#3b4654','#ffffff':'#18212c','#dce7f2':'#344d67','#f0f3f6':'#273341','#dce1e6':'#3b4654','#eaf0f5':'#2b3949','#40566d':'#c1d0df','#c7d0da':'#435163'}.items():palette=palette.replace(a,b)
         palette+='QLineEdit,QComboBox,QSpinBox,QDoubleSpinBox {selection-color:#ffffff;} QPushButton#primary {color:#ffffff;} QPushButton#running {background:#914d44;color:#ffffff;border:1px solid #b87366;}'
     else:palette+='QPushButton#running {background:#a44b3f;color:#ffffff;border:1px solid #a44b3f;}'
     accents=('QPushButton#connect {background:#315e4c;color:#ffffff;border-color:#4f8b70;} QPushButton#connect:hover {background:#3c745e;} '
@@ -119,7 +121,7 @@ class Window(W.QMainWindow):
     connect_request=QtCore.Signal();disconnect_request=QtCore.Signal()
     integration_request=QtCore.Signal(int);exposure_auto_request=QtCore.Signal(bool);average_request=QtCore.Signal(int);start_request=QtCore.Signal(int,int,bool);stop_request=QtCore.Signal();auto_request=QtCore.Signal()
     def __init__(self,args):
-        super().__init__();self.render_revision=0;self._closing=False;self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self._last_telemetry_at=0.0;self.sampling_context=None;self.capture_started_at=None;self.peaks=[];self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
+        super().__init__();self.render_revision=0;self._closing=False;self.args=args;self.frame_data=None;self.dark=None;self.pending_dark=False;self.ready=False;self.busy=False;self.last_time=None;self._last_telemetry_at=0.0;self.sampling_context=None;self.capture_started_at=None;self.peaks=[];self.manual_ranges=[];self.manual_peaks=[];self._table_rows=[];self._sort_column=None;self._sort_order=QtCore.Qt.SortOrder.DescendingOrder;self.profile=None;self.processing={};self.calibration_error=None;self.device_present=bool(args.demo);self.connecting=False
         self.setWindowTitle('SpectraDesk · 光谱测量工作台');area=W.QApplication.primaryScreen().availableGeometry();self.resize(min(1560,int(area.width()*.94)),min(1000,int(area.height()*.94)));self.setMinimumSize(1180,760)
         self.camera_profile_path=Path(QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.StandardLocation.AppConfigLocation))/'camera-profile.json'
         self.camera_profile=CameraProfile.load(Path(__file__).with_name('data')/'camera-2025051804.json')
@@ -247,6 +249,16 @@ class Window(W.QMainWindow):
         if getattr(self.args,'renderer','opengl')=='cached-image':
             for item in (self.curve.curve,self.raw_curve.curve):item.setCacheMode(W.QGraphicsItem.CacheMode.DeviceCoordinateCache)
         self.halfline=self.plot.plot(pen=pg.mkPen('#a96820',width=1,style=QtCore.Qt.PenStyle.DashLine))
+        self.selected_region=pg.LinearRegionItem(values=(0,0),orientation='vertical',movable=False,brush=pg.mkBrush(255,107,53,28),pen=pg.mkPen(255,107,53,120,style=QtCore.Qt.PenStyle.DashLine))
+        self.selected_region.setZValue(-10);self.selected_region.hide();self.plot.addItem(self.selected_region,ignoreBounds=True)
+        self.selected_baseline=self.plot.plot(pen=pg.mkPen('#ff6b35',width=1.4,style=QtCore.Qt.PenStyle.DotLine))
+        self.selected_baseline.setZValue(35);self.selected_baseline.hide()
+        self.selected_curve=self.plot.create_curve(pen=pg.mkPen('#ff6b35',width=3.6))
+        if isinstance(self.selected_curve,GpuSpectrumCurve):
+            self.selected_curve.effect=4;self.selected_curve.highlight_width=4.4
+        self.selected_curve.setZValue(38);self.selected_curve.hide()
+        self.selected_marker=pg.ScatterPlotItem(size=12,symbol='o',pxMode=True,brush='#ff6b35',pen=pg.mkPen('#ffffff',width=1.8))
+        self.selected_marker.setZValue(48);self.selected_marker.hide();self.plot.addItem(self.selected_marker,ignoreBounds=True)
         self.area_starts=pg.ScatterPlotItem(size=10,symbol='t1',brush='#20bfc4',pen=pg.mkPen('#14777a'));self.plot.addItem(self.area_starts,ignoreBounds=True)
         self.area_ends=pg.ScatterPlotItem(size=10,symbol='t',brush='#ee9980',pen=pg.mkPen('#995137'));self.plot.addItem(self.area_ends,ignoreBounds=True)
         self.cursor_wave=None
@@ -263,12 +275,23 @@ class Window(W.QMainWindow):
         self.warning_label.setSizePolicy(W.QSizePolicy.Policy.Ignored,W.QSizePolicy.Policy.Fixed)
         navigation.addWidget(self.warning_label,1);l.addLayout(navigation)
         self.spectrum_view.sigRangeChanged.connect(self.update_navigation)
-        main.addWidget(graph,1)
-        panel,l=self.card();top=W.QHBoxLayout();top.addWidget(self.label('峰值分析','section'));top.addStretch();top.addWidget(self.label('分析范围 / nm','muted'))
+        panel,l=self.card();top=W.QHBoxLayout();top.addWidget(self.label('峰值分析','section'))
+        self.add_manual_peak_btn=W.QPushButton('+ 手工峰');self.add_manual_peak_btn.clicked.connect(self.add_manual_peak);top.addWidget(self.add_manual_peak_btn)
+        self.remove_manual_peak_btn=W.QPushButton('删除选中');self.remove_manual_peak_btn.setEnabled(False);self.remove_manual_peak_btn.clicked.connect(self.remove_selected_manual_peak);top.addWidget(self.remove_manual_peak_btn)
+        top.addStretch();top.addWidget(self.label('分析范围 / nm','muted'))
         self.range_start=DigitDoubleSpinBox();self.range_end=DigitDoubleSpinBox()
         for box,value in [(self.range_start,350),(self.range_end,900)]:box.setDecimals(1);box.setRange(200,1100);box.setValue(value);box.setFixedWidth(max(118,self.fontMetrics().horizontalAdvance('1100.0')+48));box.valueChanged.connect(self.render);top.addWidget(box)
-        l.addLayout(top);self.table=W.QTableWidget(0,6);self.table.setHorizontalHeaderLabels(['峰位 / nm','强度 / counts','FWHM / nm','起点 / nm','终点 / nm','峰面积\ncounts·nm']);self.table.horizontalHeader().setSectionResizeMode(W.QHeaderView.ResizeMode.Stretch);self.table.horizontalHeader().setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignCenter);self.table.verticalHeader().hide();self.table.setEditTriggers(W.QAbstractItemView.EditTrigger.NoEditTriggers);self.table.setSelectionBehavior(W.QAbstractItemView.SelectionBehavior.SelectRows);self.table.verticalHeader().setDefaultSectionSize(self.fontMetrics().height()+12);self.table.setMinimumHeight(120);self.table.setMaximumHeight(200);self.table.setAlternatingRowColors(True);l.addWidget(self.table)
-        main.addWidget(panel)
+        l.addLayout(top);self.table=W.QTableWidget(0,6);self.table.setHorizontalHeaderLabels(['峰位 / nm','强度 / counts','FWHM / nm','起点 / nm','终点 / nm','峰面积\ncounts·nm'])
+        header_view=self.table.horizontalHeader();header_view.setSectionResizeMode(W.QHeaderView.ResizeMode.Stretch);header_view.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        header_view.setSectionsClickable(True);header_view.setSortIndicatorShown(True);header_view.sectionClicked.connect(self.on_peak_header_clicked)
+        self.table.verticalHeader().hide();self.table.setEditTriggers(W.QAbstractItemView.EditTrigger.DoubleClicked|W.QAbstractItemView.EditTrigger.EditKeyPressed);self.table.setSelectionBehavior(W.QAbstractItemView.SelectionBehavior.SelectRows);self.table.verticalHeader().setDefaultSectionSize(self.fontMetrics().height()+12);self.table.setMinimumHeight(110);self.table.setAlternatingRowColors(True)
+        self.table.itemChanged.connect(self.on_peak_item_changed);self.table.itemSelectionChanged.connect(self.on_peak_selection_changed)
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Delete),self.table,self.remove_selected_manual_peak,context=QtCore.Qt.ShortcutContext.WidgetShortcut)
+        l.addWidget(self.table)
+        self.main_splitter=W.QSplitter(QtCore.Qt.Orientation.Vertical);self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(graph);self.main_splitter.addWidget(panel)
+        self.main_splitter.setStretchFactor(0,3);self.main_splitter.setStretchFactor(1,1)
+        main.addWidget(self.main_splitter,1)
         self.status=self.statusBar();self.status.showMessage('正在寻找光谱仪…')
         self.sampling_indicator=SamplingIndicator();self.status.addPermanentWidget(self.sampling_indicator)
         self.measure_status=self.label('— 帧  ·  — Hz','muted');self.status.addPermanentWidget(self.measure_status)
@@ -532,23 +555,18 @@ class Window(W.QMainWindow):
         starts=[];ends=[]
         r_start=self.range_start.value();r_end=self.range_end.value()
         integ_ctx=prepare_integration_context(x,y,r_start,r_end) if self.peaks else None
-        with QtCore.QSignalBlocker(self.table):
-            if self.table.rowCount()!=len(self.peaks):self.table.setRowCount(len(self.peaks))
-            for row,p in enumerate(self.peaks):
-                p.area=integrate_peak(x,y,p,r_start,r_end,_context=integ_ctx)
-                area=p.area
-                texts=[f'{p.wavelength:.1f}',f'{p.intensity:.1f}','—' if p.fwhm is None else f'{p.fwhm:.1f}',
-                       '—' if area is None or area.start is None else f'{area.start:.1f}',
-                       '—' if area is None or area.end is None else f'{area.end:.1f}',
-                       '—' if area is None or area.value is None else f'{area.value:,.1f}']
-                for col,text in enumerate(texts):
-                    item=self.table.item(row,col)
-                    if item is None:
-                        item=W.QTableWidgetItem(text);item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter);self.table.setItem(row,col,item)
-                    elif item.text()!=text:item.setText(text)
-                if area is not None:
-                    if area.start is not None:starts.append(area.start)
-                    if area.end is not None:ends.append(area.end)
+        for p in self.peaks:
+            p.area=integrate_peak(x,y,p,r_start,r_end,_context=integ_ctx)
+            if p.area is not None:
+                if p.area.start is not None:starts.append(p.area.start)
+                if p.area.end is not None:ends.append(p.area.end)
+        clip_thresh=None if camera else 16500
+        self.manual_peaks=[analyze_manual_peak(x,y,s,e,clip_threshold=clip_thresh) for s,e in self.manual_ranges]
+        for mp in self.manual_peaks:
+            if mp is not None and mp.area is not None:
+                if mp.area.start is not None:starts.append(mp.area.start)
+                if mp.area.end is not None:ends.append(mp.area.end)
+        self.populate_peak_table()
         self.area_starts.setData(starts,np.interp(starts,x,shown) if starts else [])
         self.area_ends.setData(ends,np.interp(ends,x,shown) if ends else [])
         notes=[]
@@ -560,6 +578,169 @@ class Window(W.QMainWindow):
         self.show_notice('  ·  '.join(notes),warning=clipped or self.range_start.value()>=self.range_end.value())
         # Derived data can change while acquisition is paused (range, dark, calibration).
         self.render_revision+=1
+    def _peak_sort_value(self,entry,column):
+        p,manual_idx=entry
+        if column==0:return p.wavelength if p is not None else None
+        if column==1:return p.intensity if p is not None else None
+        if column==2:return p.fwhm if p is not None else None
+        if column==3:return self.manual_ranges[manual_idx][0] if manual_idx is not None else (p.area.start if p and p.area else None)
+        if column==4:return self.manual_ranges[manual_idx][1] if manual_idx is not None else (p.area.end if p and p.area else None)
+        if column==5:return p.area.value if p and p.area else None
+        return None
+    def populate_peak_table(self):
+        if self.table.state()==W.QAbstractItemView.State.EditingState:return
+        rows=[(p,None) for p in self.peaks]+[(mp,idx) for idx,mp in enumerate(self.manual_peaks)]
+        if self._sort_column is not None:
+            reverse=self._sort_order==QtCore.Qt.SortOrder.DescendingOrder
+            valid=[e for e in rows if self._peak_sort_value(e,self._sort_column) is not None]
+            missing=[e for e in rows if self._peak_sort_value(e,self._sort_column) is None]
+            valid.sort(key=lambda e:self._peak_sort_value(e,self._sort_column),reverse=reverse)
+            rows=valid+missing
+        self._table_rows=rows
+        dark=self.theme.currentText()=='暗色' or (self.theme.currentText()=='跟随系统' and W.QApplication.instance().styleHints().colorScheme()==QtCore.Qt.ColorScheme.Dark)
+        manual_bg=QtGui.QBrush(QtGui.QColor('#3a3122' if dark else '#fdf1d6'))
+        default_bg=QtGui.QBrush()
+        base_flags=QtCore.Qt.ItemFlag.ItemIsSelectable|QtCore.Qt.ItemFlag.ItemIsEnabled
+        edit_flags=base_flags|QtCore.Qt.ItemFlag.ItemIsEditable
+        with QtCore.QSignalBlocker(self.table):
+            if self.table.rowCount()!=len(rows):self.table.setRowCount(len(rows))
+            for row,(p,manual_idx) in enumerate(rows):
+                is_manual=manual_idx is not None
+                if p is None:
+                    s,e=self.manual_ranges[manual_idx]
+                    texts=['—','—','—',f'{s:.1f}',f'{e:.1f}','—']
+                else:
+                    area=p.area
+                    s_txt=f'{self.manual_ranges[manual_idx][0]:.1f}' if is_manual else ('—' if area is None or area.start is None else f'{area.start:.1f}')
+                    e_txt=f'{self.manual_ranges[manual_idx][1]:.1f}' if is_manual else ('—' if area is None or area.end is None else f'{area.end:.1f}')
+                    texts=[f'{p.wavelength:.1f}',f'{p.intensity:.1f}','—' if p.fwhm is None else f'{p.fwhm:.1f}',
+                           s_txt,e_txt,'—' if area is None or area.value is None else f'{area.value:,.1f}']
+                bg=manual_bg if is_manual else default_bg
+                for col,text in enumerate(texts):
+                    item=self.table.item(row,col)
+                    if item is None:
+                        item=W.QTableWidgetItem(text);item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter);self.table.setItem(row,col,item)
+                    elif item.text()!=text:item.setText(text)
+                    item.setBackground(bg)
+                    item.setFlags(edit_flags if is_manual and col in (3,4) else base_flags)
+        self.update_manual_peak_buttons()
+        self.update_selected_peak_highlight()
+    def on_peak_selection_changed(self):
+        self.update_manual_peak_buttons()
+        self.update_selected_peak_highlight()
+    def _hide_selected_peak_highlight(self):
+        for item in (self.selected_region,self.selected_baseline,self.selected_curve,self.selected_marker):
+            if item.isVisible():item.hide()
+    def update_selected_peak_highlight(self):
+        if self._closing or not hasattr(self,'selected_curve'):return
+        if self.frame_data is None or not self._table_rows or not self.table.selectionModel():
+            self._hide_selected_peak_highlight();return
+        selected=self.table.selectionModel().selectedRows()
+        if not selected:
+            self._hide_selected_peak_highlight();return
+        row=selected[0].row()
+        if not (0<=row<len(self._table_rows)):
+            self._hide_selected_peak_highlight();return
+        p,manual_idx=self._table_rows[row]
+        x=np.asarray(self.frame_data['wave']);y=np.asarray(self.displayed)
+        is_manual=manual_idx is not None
+        color='#f59e0b' if is_manual else '#ff6b35'
+        qcolor=QtGui.QColor(color)
+        fill=QtGui.QColor(qcolor);fill.setAlpha(30)
+        line=QtGui.QColor(qcolor);line.setAlpha(135)
+        self.selected_region.setBrush(pg.mkBrush(fill))
+        self.selected_region.setHoverBrush(pg.mkBrush(fill))
+        for l_item in self.selected_region.lines:l_item.setPen(pg.mkPen(line,width=1,style=QtCore.Qt.PenStyle.DashLine))
+        self.selected_curve.setPen(pg.mkPen(color,width=3.6))
+        self.selected_baseline.setPen(pg.mkPen(color,width=1.4,style=QtCore.Qt.PenStyle.DotLine))
+        self.selected_marker.setBrush(color)
+
+        area=p.area if p is not None else None
+        if is_manual:
+            s,e=self.manual_ranges[manual_idx]
+        elif area is not None and area.start is not None and area.end is not None:
+            s,e=area.start,area.end
+        elif p is not None and p.left is not None and p.right is not None:
+            s,e=p.left,p.right
+        elif p is not None:
+            s,e=p.wavelength-4.0,p.wavelength+4.0
+        else:
+            self._hide_selected_peak_highlight();return
+
+        self.selected_region.setRegion((s,e));self.selected_region.show()
+        mask=(x>=s)&(x<=e)&np.isfinite(y)
+        if np.count_nonzero(mask)>=2:
+            self.selected_curve.setData(x[mask],y[mask]);self.selected_curve.show()
+        else:
+            self.selected_curve.hide()
+        if area is not None and area.baseline_start is not None and area.baseline_end is not None and area.start is not None and area.end is not None:
+            self.selected_baseline.setData([area.start,area.end],[area.baseline_start,area.baseline_end]);self.selected_baseline.show()
+        else:
+            self.selected_baseline.hide()
+        if p is not None:
+            py=float(np.interp(p.wavelength,x,y)) if x.size else p.intensity
+            self.selected_marker.setData([p.wavelength],[py]);self.selected_marker.show()
+        else:
+            self.selected_marker.hide()
+    @QtCore.Slot(int)
+    def on_peak_header_clicked(self,column):
+        if self._sort_column==column:
+            self._sort_order=QtCore.Qt.SortOrder.AscendingOrder if self._sort_order==QtCore.Qt.SortOrder.DescendingOrder else QtCore.Qt.SortOrder.DescendingOrder
+        else:
+            self._sort_column=column
+            self._sort_order=QtCore.Qt.SortOrder.AscendingOrder if column in (0,3,4) else QtCore.Qt.SortOrder.DescendingOrder
+        self.table.horizontalHeader().setSortIndicator(self._sort_column,self._sort_order)
+        self.populate_peak_table()
+    def update_manual_peak_buttons(self):
+        selected=self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        has_manual=any(0<=idx.row()<len(self._table_rows) and self._table_rows[idx.row()][1] is not None for idx in selected)
+        self.remove_manual_peak_btn.setEnabled(has_manual)
+    def add_manual_peak(self):
+        if self.frame_data is not None:
+            low,high=self.spectrum_view.viewRange()[0];center=(low+high)/2
+            half=min(15.0,max(2.0,(high-low)*.08))
+            d_start,d_end=round(max(200.0,center-half),1),round(min(1100.0,center+half),1)
+        else:
+            d_start,d_end=540.0,555.0
+        dialog=W.QDialog(self);dialog.setWindowTitle('添加手工峰区间');form=W.QFormLayout(dialog)
+        start_box=DigitDoubleSpinBox();end_box=DigitDoubleSpinBox()
+        for box,val in ((start_box,d_start),(end_box,d_end)):
+            box.setDecimals(1);box.setRange(200,1100);box.setValue(val);box.setSuffix(' nm');form.addRow('起点' if box is start_box else '终点',box)
+        buttons=W.QDialogButtonBox(W.QDialogButtonBox.StandardButton.Ok|W.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);form.addRow(buttons)
+        if dialog.exec()!=W.QDialog.DialogCode.Accepted:return
+        s,e=float(start_box.value()),float(end_box.value())
+        if s>=e:
+            W.QMessageBox.warning(self,'区间无效','起点必须小于终点。');return
+        self.manual_ranges.append((s,e))
+        self.persist_settings()
+        if self.frame_data is not None:self.render()
+        else:self.manual_peaks.append(None);self.populate_peak_table()
+    def remove_selected_manual_peak(self):
+        selected=self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        indices=sorted({self._table_rows[idx.row()][1] for idx in selected if 0<=idx.row()<len(self._table_rows) and self._table_rows[idx.row()][1] is not None},reverse=True)
+        if not indices:return
+        for idx in indices:del self.manual_ranges[idx]
+        self.persist_settings()
+        if self.frame_data is not None:self.render()
+        else:
+            for idx in indices:
+                if idx<len(self.manual_peaks):del self.manual_peaks[idx]
+            self.populate_peak_table()
+    @QtCore.Slot(W.QTableWidgetItem)
+    def on_peak_item_changed(self,item):
+        row,col=item.row(),item.column()
+        if col not in (3,4) or not (0<=row<len(self._table_rows)):return
+        manual_idx=self._table_rows[row][1]
+        if manual_idx is None:return
+        try:val=float(item.text().strip())
+        except ValueError:QtCore.QTimer.singleShot(0,self.populate_peak_table);return
+        s,e=self.manual_ranges[manual_idx]
+        ns,ne=(val,e) if col==3 else (s,val)
+        if not (200<=ns<ne<=1100):
+            QtCore.QTimer.singleShot(0,self.populate_peak_table);return
+        self.manual_ranges[manual_idx]=(ns,ne);self.persist_settings()
+        QtCore.QTimer.singleShot(0,self.render if self.frame_data is not None else self.populate_peak_table)
     def show_notice(self,text,warning=True):
         # A permanent single-line slot prevents frame warnings from moving the plot.
         text=' '.join(text.split())
@@ -668,6 +849,8 @@ class Window(W.QMainWindow):
         for name in ('integration','average','smooth','display_start','display_end','range_start','range_end'):store.setValue(name,getattr(self,name).value())
         for name in ('mode','theme'):store.setValue(name,getattr(self,name).currentIndex())
         for name in ('overlay','calibration_enabled','nonlinearity_enabled','camera_exposure_auto','raw_preview_toggle'):store.setValue(name,getattr(self,name).isChecked())
+        store.setValue('manual_ranges',json.dumps(self.manual_ranges))
+        store.setValue('main_splitter',self.main_splitter.sizes())
         store.sync()
     def restore_settings(self):
         self.restoring=True;store=self.settings_store()
@@ -679,9 +862,21 @@ class Window(W.QMainWindow):
             box=getattr(self,name);box.setCurrentIndex(int(store.value(name,0)));box.currentIndexChanged.connect(self.persist_settings)
         for name in ('overlay','calibration_enabled','nonlinearity_enabled','camera_exposure_auto','raw_preview_toggle'):
             box=getattr(self,name);box.setChecked(store.value(name,getattr(self.args,'backend','')=='camera' if name=='raw_preview_toggle' else True,type=bool));box.toggled.connect(self.persist_settings)
+        raw_ranges=store.value('manual_ranges','')
+        if raw_ranges:
+            try:
+                parsed=json.loads(raw_ranges)
+                if isinstance(parsed,list):
+                    self.manual_ranges=[(float(s),float(e)) for s,e in parsed if 200<=float(s)<float(e)<=1100]
+                    self.manual_peaks=[None]*len(self.manual_ranges)
+            except (ValueError,TypeError):pass
+        sizes=store.value('main_splitter')
+        if isinstance(sizes,list) and len(sizes)==2:
+            try:self.main_splitter.setSizes([int(v) for v in sizes])
+            except (ValueError,TypeError):pass
         geometry=store.value('window/geometry',QtCore.QByteArray())
         if isinstance(geometry,QtCore.QByteArray) and not geometry.isEmpty():self.restoreGeometry(geometry)
-        self.restoring=False;self.change_theme()
+        self.restoring=False;self.change_theme();self.populate_peak_table()
         W.QApplication.instance().styleHints().colorSchemeChanged.connect(lambda *_:self.change_theme())
     def change_theme(self,*_):
         if self._closing:return
@@ -690,6 +885,7 @@ class Window(W.QMainWindow):
         self.cursor_marker.setPen(pg.mkPen('#ffffff' if dark else '#805615',width=1.5))
         for name in ('left','bottom'):
             axis=self.plot.getAxis(name);axis.setPen('#aebfd0' if dark else '#526477');axis.setTextPen('#aebfd0' if dark else '#526477')
+        if self.frame_data is None and hasattr(self,'table'):self.populate_peak_table()
         self.render()
     def settings(self):return dict(calibration=self.processing,calibration_profile=self.profile.data if 'profile_sha256' in self.processing else None,smoothing='STA display-only',smooth_count=self.smooth.value(),plot_mode=self.mode.currentText(),analysis_range_nm=[self.range_start.value(),self.range_end.value()],fwhm_baseline='10th percentile of full spectrum',integration_mode="camera driver settings" if self.frame_data.get("backend")=="camera" else "STA integer parameter",display_range_nm=[self.display_start.value(),self.display_end.value()],dark_metadata=None if self.applied_dark is None else {k:v for k,v in self.dark.items() if k!='counts'})
     def create_save_dialog(self):

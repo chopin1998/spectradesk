@@ -291,6 +291,15 @@ class GpuSpectrumCurve(pg.PlotCurveItem):
         gl.glBindTexture(GL_TEXTURE_2D,0);gl.glActiveTexture(GL_TEXTURE0)
     def paintGL(self,widget):
         state=self.glstate;state.setup(widget.context())
+        if self.effect==4:
+            state.history_key=None
+            gl=widget.getFunctions();dpr=widget.devicePixelRatioF()
+            size=QtCore.QSize(round(widget.width()*dpr),round(widget.height()*dpr))
+            gl.glViewport(0,0,size.width(),size.height());widget.setViewboxClip(self.getViewBox())
+            gl.glEnable(GL.GL_BLEND);gl.glBlendFunc(GL.GL_SRC_ALPHA,GL.GL_ONE_MINUS_SRC_ALPHA)
+            self.draw_sdf_ribbon(widget,glow=True,color_override=self.opts['pen'].color(),half_width=getattr(self,'highlight_width',4.2))
+            gl.glDisable(GL.GL_BLEND)
+            return
         if self.effect!=3:
             state.history_key=None
             return self.draw_spectrum(widget)
